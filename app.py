@@ -4,13 +4,12 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 from streamlit_drawable_canvas import st_canvas
-from PIL import Image
+from PIL import Image, ImageDraw
 import io
 import base64
 import uuid
 import tempfile
 import os
-import numpy as np
 from fpdf import FPDF
 
 st.set_page_config(page_title="Controle de Equipamentos", layout="wide")
@@ -64,32 +63,37 @@ df_registros = carregar_dados(aba_registros, ['ID', 'Equipamento', 'Lacre', 'Col
 df_ferramentas = carregar_dados(aba_ferramentas, ['Equipamento', 'Lacre'])
 df_colaboradores = carregar_dados(aba_colaboradores, ['Nome'])
 
-# Converte a imagem
-def array_to_base64(img_array):
-    if img_array is None:
-        return ""
-    try:
-        img = Image.fromarray((img_array).astype(np.uint8), mode='RGBA')
-        background = Image.new('RGBA', img.size, (255, 255, 255))
-        alpha_composite = Image.alpha_composite(background, img)
-        alpha_composite_3 = alpha_composite.convert('RGB')
-        buffered = io.BytesIO()
-        alpha_composite_3.save(buffered, format="JPEG")
-        return base64.b64encode(buffered.getvalue()).decode("utf-8")
-    except Exception:
-        return ""
+# ====================================================================
+# A SOLUÇÃO DEFINITIVA: Recriar o desenho via matemática (Coordenadas)
+# Isso bypassa 100% o bug do RuntimeError da biblioteca
+# ====================================================================
+def json_para_imagem(json_data):
+    img = Image.new("RGBA", (400, 150), (238, 238, 238, 255)) # Fundo cinza claro
+    draw = ImageDraw.Draw(img)
 
-# ==========================================
-# FUNÇÃO BLINDADA CONTRA O ERRO VERMELHO
-# ==========================================
-def obter_imagem_assinatura(canvas_obj):
-    try:
-        # Tenta pegar a imagem do desenho
-        return canvas_obj.image_data
-    except Exception:
-        # Se a biblioteca falhar (RuntimeError), nós impedimos a tela de quebrar
-        # retornando vazio para que o sistema apenas peça para clicar de novo.
-        return None
+    if json_data and "objects" in json_data:
+        for obj in json_data["objects"]:
+            if obj.get("type") == "path":
+                path = obj.get("path", [])
+                points = []
+                for cmd in path:
+                    # Extrai as coordenadas X e Y exatas de cada traço
+                    if len(cmd) >= 3 and isinstance(cmd[-1], (int, float)) and isinstance(cmd[-2], (int, float)):
+                        points.append((cmd[-2], cmd[-1]))
+                if len(points) > 1:
+                    draw.line(points, fill="#000000", width=2, joint="curve")
+                elif len(points) == 1:
+                    x, y = points[0]
+                    draw.ellipse([x-1, y-1, x+1, y+1], fill="#000000")
+    return img
+
+def pil_to_base64(img):
+    if img is None:
+        return ""
+    img_rgb = img.convert('RGB')
+    buffered = io.BytesIO()
+    img_rgb.save(buffered, format="JPEG")
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 # --- Interface do Sistema ---
 st.title("Controle de Ferramentas - Almoxarifado")
@@ -126,11 +130,12 @@ if menu == "Registrar Movimentação":
         if st.button("Confirmar Saída"):
             if colab_selecionado != "Selecione..." and ferramenta_selecionada != "Selecione...":
                 
-                # USA A FUNÇÃO BLINDADA PARA LER A IMAGEM
-                imagem_desenhada = obter_imagem_assinatura(canvas_saida)
-                
-                if imagem_desenhada is not None:
-                    assinatura_b64 = array_to_base64(imagem_desenhada)
+                # FIM DO ERRO: Não pedimos a imagem, nós lemos os dados matemáticos (json) que NUNCA falham!
+                if canvas_saida.json_data is not None and len(canvas_saida.json_data.get("objects", [])) > 0:
+                    
+                    img_gerada_matematicamente = json_para_imagem(canvas_saida.json_data)
+                    assinatura_b64 = pil_to_base64(img_gerada_matematicamente)
+                    
                     equipamento_nome = ferramenta_selecionada.split(" (Lacre: ")[0]
                     lacre_numero = ferramenta_selecionada.split(" (Lacre: ")[1].replace(")", "")
                     
@@ -144,8 +149,7 @@ if menu == "Registrar Movimentação":
                     st.success("Saída registrada com sucesso!")
                     st.rerun()
                 else:
-                    # Se der a falha invisível, o sistema não quebra, só avisa:
-                    st.warning("⏳ O sistema ainda está processando a imagem. Por favor, **clique em Confirmar novamente**.")
+                    st.warning("⚠️ Desenhe a assinatura no quadro acima antes de confirmar.")
             else:
                 st.warning("Selecione o colaborador e a ferramenta.")
 
@@ -166,11 +170,12 @@ if menu == "Registrar Movimentação":
                 if st.button("Confirmar Devolução"):
                     if devolucao_selecionada != "Selecione...":
                         
-                        # USA A FUNÇÃO BLINDADA PARA LER A IMAGEM
-                        imagem_desenhada_ent = obter_imagem_assinatura(canvas_entrada)
-                        
-                        if imagem_desenhada_ent is not None:
-                            assinatura_b64 = array_to_base64(imagem_desenhada_ent)
+                        # MESMA SOLUÇÃO AQUI: Lemos os dados matemáticos!
+                        if canvas_entrada.json_data is not None and len(canvas_entrada.json_data.get("objects", [])) > 0:
+                            
+                            img_gerada_matematicamente_ent = json_para_imagem(canvas_entrada.json_data)
+                            assinatura_b64 = pil_to_base64(img_gerada_matematicamente_ent)
+                            
                             equip_lacre = devolucao_selecionada.split(") - ")[0] + ")"
                             equipamento_nome = equip_lacre.split(" (Lacre: ")[0]
                             lacre_numero = equip_lacre.split(" (Lacre: ")[1].replace(")", "")
@@ -194,7 +199,7 @@ if menu == "Registrar Movimentação":
                             st.success("Devolução registrada com sucesso!")
                             st.rerun()
                         else:
-                            st.warning("⏳ O sistema ainda está processando a imagem. Por favor, **clique em Confirmar novamente**.")
+                            st.warning("⚠️ Desenhe a assinatura no quadro acima antes de confirmar.")
                     else:
                         st.warning("Selecione a ferramenta.")
             else:
