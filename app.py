@@ -27,27 +27,25 @@ def conectar_google_sheets():
         planilha_url = "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=1708575817#gid=1708575817"
         
         if "COLE_O_LINK" in planilha_url:
-            return None, "Você esqueceu de colar o link real da planilha no código (linha 27)."
+            return None, "Você esqueceu de colar o link real da planilha no código."
             
         planilha = client.open_by_url(planilha_url)
         return planilha, None
     except Exception as e:
-        return None, f"Verifique se o e-mail do robô tem permissão de Editor na planilha. (Erro técnico: {str(e)})"
+        return None, f"Erro técnico: {str(e)}"
 
 planilha, erro_conexao = conectar_google_sheets()
 
 if erro_conexao:
-    st.error("⚠️ **Problema de Conexão com o Google Sheets**")
-    st.warning(f"{erro_conexao}")
+    st.error("⚠️ Problema de Conexão com o Google Sheets")
     st.stop()
 
 try:
     aba_registros = planilha.worksheet("Registros")
     aba_ferramentas = planilha.worksheet("Ferramentas")
     aba_colaboradores = planilha.worksheet("Colaboradores")
-except Exception as e:
-    st.error("⚠️ **Abas não encontradas na Planilha**")
-    st.warning("Verifique se as abas se chamam exatamente: Registros, Ferramentas e Colaboradores.")
+except Exception:
+    st.error("⚠️ Abas não encontradas na Planilha")
     st.stop()
 
 def carregar_dados(aba, colunas):
@@ -67,7 +65,6 @@ def array_to_base64(img_array):
     background = Image.new('RGBA', img.size, (255, 255, 255))
     alpha_composite = Image.alpha_composite(background, img)
     alpha_composite_3 = alpha_composite.convert('RGB')
-    
     buffered = io.BytesIO()
     alpha_composite_3.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
@@ -96,32 +93,39 @@ if menu == "Registrar Movimentação":
             disponiveis = []
             
         ferramenta_selecionada = st.selectbox("Ferramenta Disponível", ["Selecione..."] + disponiveis)
-        
         st.write("Assinatura de Retirada (Desenhe abaixo):")
         
-        with st.form("form_saida", clear_on_submit=True):
-            canvas_saida = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_saida")
-            botao_saida = st.form_submit_button("Confirmar Saída")
-            
-            if botao_saida:
-                if colab_selecionado != "Selecione..." and ferramenta_selecionada != "Selecione...":
-                    # O formulário força a espera da imagem
-                    if canvas_saida.image_data is not None and np.sum(canvas_saida.image_data) > 0:
-                        assinatura_b64 = array_to_base64(canvas_saida.image_data)
-                        equipamento_nome = ferramenta_selecionada.split(" (Lacre: ")[0]
-                        lacre_numero = ferramenta_selecionada.split(" (Lacre: ")[1].replace(")", "")
-                        
-                        novo_id = str(uuid.uuid4())
-                        data_saida = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        
-                        novo_registro = [novo_id, equipamento_nome, lacre_numero, colab_selecionado, data_saida, assinatura_b64, "", "", "Em uso", 0.0]
-                        aba_registros.append_row(novo_registro)
-                        st.success("Saída registrada com sucesso!")
-                        st.rerun()
-                    else:
-                        st.warning("Por favor, desenhe a assinatura antes de confirmar.")
+        canvas_saida = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_saida", update_streamlit=True)
+        
+        if st.button("Confirmar Saída"):
+            if colab_selecionado != "Selecione..." and ferramenta_selecionada != "Selecione...":
+                img_valida = False
+                img_saida = None
+                
+                # BLINDAGEM CONTRA O ERRO: Ignora qualquer erro técnico da assinatura
+                try:
+                    img_saida = canvas_saida.image_data
+                    if img_saida is not None and np.sum(img_saida) > 0:
+                        img_valida = True
+                except Exception:
+                    pass
+                
+                if img_valida:
+                    assinatura_b64 = array_to_base64(img_saida)
+                    equipamento_nome = ferramenta_selecionada.split(" (Lacre: ")[0]
+                    lacre_numero = ferramenta_selecionada.split(" (Lacre: ")[1].replace(")", "")
+                    
+                    novo_id = str(uuid.uuid4())
+                    data_saida = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    novo_registro = [novo_id, equipamento_nome, lacre_numero, colab_selecionado, data_saida, assinatura_b64, "", "", "Em uso", 0.0]
+                    aba_registros.append_row(novo_registro)
+                    st.success("Saída registrada com sucesso!")
+                    st.rerun()
                 else:
-                    st.warning("Selecione o colaborador e a ferramenta.")
+                    st.warning("⚠️ Assinatura não identificada. Por favor, aguarde 1 segundo após desenhar e clique de novo.")
+            else:
+                st.warning("Selecione o colaborador e a ferramenta.")
 
     with tab_entrada:
         if not df_registros.empty:
@@ -129,42 +133,50 @@ if menu == "Registrar Movimentação":
             if not em_uso.empty:
                 opcoes_devolucao = em_uso['Equipamento'].astype(str) + " (Lacre: " + em_uso['Lacre'].astype(str) + ") - " + em_uso['Colaborador'].astype(str)
                 devolucao_selecionada = st.selectbox("Ferramenta para Devolver", ["Selecione..."] + opcoes_devolucao.tolist())
-                
                 st.write("Assinatura de Devolução (Desenhe abaixo):")
                 
-                with st.form("form_entrada", clear_on_submit=True):
-                    canvas_entrada = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_entrada")
-                    botao_entrada = st.form_submit_button("Confirmar Devolução")
-                    
-                    if botao_entrada:
-                        if devolucao_selecionada != "Selecione...":
-                            if canvas_entrada.image_data is not None and np.sum(canvas_entrada.image_data) > 0:
-                                assinatura_b64 = array_to_base64(canvas_entrada.image_data)
-                                equip_lacre = devolucao_selecionada.split(") - ")[0] + ")"
-                                equipamento_nome = equip_lacre.split(" (Lacre: ")[0]
-                                lacre_numero = equip_lacre.split(" (Lacre: ")[1].replace(")", "")
-                                colab_nome = devolucao_selecionada.split(") - ")[1]
-                                
-                                linha_df = em_uso[(em_uso['Equipamento'] == equipamento_nome) & (em_uso['Lacre'].astype(str) == str(lacre_numero)) & (em_uso['Colaborador'] == colab_nome)].iloc[0]
-                                id_registro = linha_df['ID']
-                                data_saida = datetime.strptime(linha_df['Data_Hora_Saida'], "%Y-%m-%d %H:%M:%S")
-                                data_entrada = datetime.now()
-                                tempo_uso = round((data_entrada - data_saida).total_seconds() / 3600, 2)
-                                
-                                celula = aba_registros.find(str(id_registro))
-                                linha_sheet = celula.row
-                                
-                                aba_registros.update_cell(linha_sheet, 7, data_entrada.strftime("%Y-%m-%d %H:%M:%S"))
-                                aba_registros.update_cell(linha_sheet, 8, assinatura_b64)
-                                aba_registros.update_cell(linha_sheet, 9, "Devolvido")
-                                aba_registros.update_cell(linha_sheet, 10, tempo_uso)
-                                
-                                st.success("Devolução registrada com sucesso!")
-                                st.rerun()
-                            else:
-                                st.warning("Por favor, desenhe a assinatura antes de confirmar.")
+                canvas_entrada = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_entrada", update_streamlit=True)
+                
+                if st.button("Confirmar Devolução"):
+                    if devolucao_selecionada != "Selecione...":
+                        img_valida = False
+                        img_entrada = None
+                        
+                        # BLINDAGEM CONTRA O ERRO NA ENTRADA
+                        try:
+                            img_entrada = canvas_entrada.image_data
+                            if img_entrada is not None and np.sum(img_entrada) > 0:
+                                img_valida = True
+                        except Exception:
+                            pass
+                            
+                        if img_valida:
+                            assinatura_b64 = array_to_base64(img_entrada)
+                            equip_lacre = devolucao_selecionada.split(") - ")[0] + ")"
+                            equipamento_nome = equip_lacre.split(" (Lacre: ")[0]
+                            lacre_numero = equip_lacre.split(" (Lacre: ")[1].replace(")", "")
+                            colab_nome = devolucao_selecionada.split(") - ")[1]
+                            
+                            linha_df = em_uso[(em_uso['Equipamento'] == equipamento_nome) & (em_uso['Lacre'].astype(str) == str(lacre_numero)) & (em_uso['Colaborador'] == colab_nome)].iloc[0]
+                            id_registro = linha_df['ID']
+                            data_saida = datetime.strptime(linha_df['Data_Hora_Saida'], "%Y-%m-%d %H:%M:%S")
+                            data_entrada = datetime.now()
+                            tempo_uso = round((data_entrada - data_saida).total_seconds() / 3600, 2)
+                            
+                            celula = aba_registros.find(str(id_registro))
+                            linha_sheet = celula.row
+                            
+                            aba_registros.update_cell(linha_sheet, 7, data_entrada.strftime("%Y-%m-%d %H:%M:%S"))
+                            aba_registros.update_cell(linha_sheet, 8, assinatura_b64)
+                            aba_registros.update_cell(linha_sheet, 9, "Devolvido")
+                            aba_registros.update_cell(linha_sheet, 10, tempo_uso)
+                            
+                            st.success("Devolução registrada com sucesso!")
+                            st.rerun()
                         else:
-                            st.warning("Selecione a ferramenta.")
+                            st.warning("⚠️ Assinatura não identificada. Por favor, aguarde 1 segundo após desenhar e clique de novo.")
+                    else:
+                        st.warning("Selecione a ferramenta.")
             else:
                 st.info("Nenhuma ferramenta em uso no momento.")
 
