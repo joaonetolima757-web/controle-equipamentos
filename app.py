@@ -64,7 +64,7 @@ df_registros = carregar_dados(aba_registros, ['ID', 'Equipamento', 'Lacre', 'Col
 df_ferramentas = carregar_dados(aba_ferramentas, ['Equipamento', 'Lacre'])
 df_colaboradores = carregar_dados(aba_colaboradores, ['Nome'])
 
-# Converte a imagem com blindagem total contra erros
+# Converte a imagem
 def array_to_base64(img_array):
     if img_array is None:
         return ""
@@ -78,6 +78,18 @@ def array_to_base64(img_array):
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
     except Exception:
         return ""
+
+# ==========================================
+# FUNÇÃO BLINDADA CONTRA O ERRO VERMELHO
+# ==========================================
+def obter_imagem_assinatura(canvas_obj):
+    try:
+        # Tenta pegar a imagem do desenho
+        return canvas_obj.image_data
+    except Exception:
+        # Se a biblioteca falhar (RuntimeError), nós impedimos a tela de quebrar
+        # retornando vazio para que o sistema apenas peça para clicar de novo.
+        return None
 
 # --- Interface do Sistema ---
 st.title("Controle de Ferramentas - Almoxarifado")
@@ -103,7 +115,7 @@ if menu == "Registrar Movimentação":
             disponiveis = []
             
         ferramenta_selecionada = st.selectbox("Ferramenta Disponível", ["Selecione..."] + disponiveis)
-        st.write("Assinatura de Retirada (Desenhe abaixo):")
+        st.write("Assinatura de Retirada (Desenhe abaixo e clique em Confirmar):")
         
         canvas_saida = st_canvas(
             stroke_width=2, stroke_color="#000", background_color="#eee", 
@@ -113,9 +125,12 @@ if menu == "Registrar Movimentação":
         
         if st.button("Confirmar Saída"):
             if colab_selecionado != "Selecione..." and ferramenta_selecionada != "Selecione...":
-                # FIM DA BUROCRACIA: Pega a imagem direto, sem perguntas!
-                if canvas_saida.image_data is not None:
-                    assinatura_b64 = array_to_base64(canvas_saida.image_data)
+                
+                # USA A FUNÇÃO BLINDADA PARA LER A IMAGEM
+                imagem_desenhada = obter_imagem_assinatura(canvas_saida)
+                
+                if imagem_desenhada is not None:
+                    assinatura_b64 = array_to_base64(imagem_desenhada)
                     equipamento_nome = ferramenta_selecionada.split(" (Lacre: ")[0]
                     lacre_numero = ferramenta_selecionada.split(" (Lacre: ")[1].replace(")", "")
                     
@@ -129,7 +144,8 @@ if menu == "Registrar Movimentação":
                     st.success("Saída registrada com sucesso!")
                     st.rerun()
                 else:
-                    st.warning("Aguarde o quadro carregar completamente.")
+                    # Se der a falha invisível, o sistema não quebra, só avisa:
+                    st.warning("⏳ O sistema ainda está processando a imagem. Por favor, **clique em Confirmar novamente**.")
             else:
                 st.warning("Selecione o colaborador e a ferramenta.")
 
@@ -139,7 +155,7 @@ if menu == "Registrar Movimentação":
             if not em_uso.empty:
                 opcoes_devolucao = em_uso['Equipamento'].astype(str) + " (Lacre: " + em_uso['Lacre'].astype(str) + ") - " + em_uso['Colaborador'].astype(str)
                 devolucao_selecionada = st.selectbox("Ferramenta para Devolver", ["Selecione..."] + opcoes_devolucao.tolist())
-                st.write("Assinatura de Devolução (Desenhe abaixo):")
+                st.write("Assinatura de Devolução (Desenhe abaixo e clique em Confirmar):")
                 
                 canvas_entrada = st_canvas(
                     stroke_width=2, stroke_color="#000", background_color="#eee", 
@@ -149,8 +165,12 @@ if menu == "Registrar Movimentação":
                 
                 if st.button("Confirmar Devolução"):
                     if devolucao_selecionada != "Selecione...":
-                        if canvas_entrada.image_data is not None:
-                            assinatura_b64 = array_to_base64(canvas_entrada.image_data)
+                        
+                        # USA A FUNÇÃO BLINDADA PARA LER A IMAGEM
+                        imagem_desenhada_ent = obter_imagem_assinatura(canvas_entrada)
+                        
+                        if imagem_desenhada_ent is not None:
+                            assinatura_b64 = array_to_base64(imagem_desenhada_ent)
                             equip_lacre = devolucao_selecionada.split(") - ")[0] + ")"
                             equipamento_nome = equip_lacre.split(" (Lacre: ")[0]
                             lacre_numero = equip_lacre.split(" (Lacre: ")[1].replace(")", "")
@@ -174,7 +194,7 @@ if menu == "Registrar Movimentação":
                             st.success("Devolução registrada com sucesso!")
                             st.rerun()
                         else:
-                            st.warning("Aguarde o quadro carregar completamente.")
+                            st.warning("⏳ O sistema ainda está processando a imagem. Por favor, **clique em Confirmar novamente**.")
                     else:
                         st.warning("Selecione a ferramenta.")
             else:
