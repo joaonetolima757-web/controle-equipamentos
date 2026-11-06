@@ -46,7 +46,6 @@ df_colaboradores = carregar_dados(aba_colaboradores, ['Nome'])
 def array_to_base64(img_array):
     if img_array is None:
         return ""
-    # Remove o canal alpha e salva como RGB para evitar erros de transparência no PDF
     img = Image.fromarray((img_array).astype(np.uint8), mode='RGBA')
     background = Image.new('RGBA', img.size, (255, 255, 255))
     alpha_composite = Image.alpha_composite(background, img)
@@ -55,6 +54,17 @@ def array_to_base64(img_array):
     buffered = io.BytesIO()
     alpha_composite_3.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+# Função segura para pegar a assinatura ignorando erros da biblioteca
+def obter_imagem_segura(canvas_result):
+    if canvas_result is None:
+        return None
+    try:
+        if canvas_result.json_data is not None and len(canvas_result.json_data.get("objects", [])) > 0:
+            return canvas_result.image_data
+    except Exception:
+        pass
+    return None
 
 # --- Interface do Sistema ---
 st.title("Controle de Ferramentas - Almoxarifado")
@@ -68,7 +78,6 @@ if menu == "Registrar Movimentação":
         colab_lista = df_colaboradores['Nome'].dropna().astype(str).unique().tolist()
         colab_selecionado = st.selectbox("Colaborador Solicitante", ["Selecione..."] + colab_lista)
         
-        # Filtra apenas ferramentas que não estão em uso (Bloqueio)
         if not df_ferramentas.empty:
             ferramentas_cadastradas = df_ferramentas['Equipamento'].astype(str) + " (Lacre: " + df_ferramentas['Lacre'].astype(str) + ")"
             if not df_registros.empty:
@@ -83,13 +92,19 @@ if menu == "Registrar Movimentação":
         ferramenta_selecionada = st.selectbox("Ferramenta Disponível", ["Selecione..."] + disponiveis)
         
         st.write("Assinatura de Retirada (Desenhe abaixo):")
-        canvas_saida = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_saida", update_streamlit=True)
+        canvas_saida = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_saida")
+        
+        # Salva a assinatura na memória assim que o usuário termina o traço
+        img_saida = obter_imagem_segura(canvas_saida)
+        if img_saida is not None:
+            st.session_state["assinatura_saida_memoria"] = img_saida
         
         if st.button("Confirmar Saída"):
             if colab_selecionado != "Selecione..." and ferramenta_selecionada != "Selecione...":
-                # Verifica se o usuário realmente desenhou algo
-                if canvas_saida.json_data is not None and len(canvas_saida.json_data.get("objects", [])) > 0:
-                    assinatura_b64 = array_to_base64(canvas_saida.image_data)
+                assinatura_salva = st.session_state.get("assinatura_saida_memoria")
+                
+                if assinatura_salva is not None:
+                    assinatura_b64 = array_to_base64(assinatura_salva)
                     equipamento_nome = ferramenta_selecionada.split(" (Lacre: ")[0]
                     lacre_numero = ferramenta_selecionada.split(" (Lacre: ")[1].replace(")", "")
                     
@@ -98,6 +113,9 @@ if menu == "Registrar Movimentação":
                     
                     novo_registro = [novo_id, equipamento_nome, lacre_numero, colab_selecionado, data_saida, assinatura_b64, "", "", "Em uso", 0.0]
                     aba_registros.append_row(novo_registro)
+                    
+                    # Limpa a memória para o próximo
+                    st.session_state.pop("assinatura_saida_memoria", None)
                     st.success("Saída registrada com sucesso!")
                     st.rerun()
                 else:
@@ -113,12 +131,19 @@ if menu == "Registrar Movimentação":
                 devolucao_selecionada = st.selectbox("Ferramenta para Devolver", ["Selecione..."] + opcoes_devolucao.tolist())
                 
                 st.write("Assinatura de Devolução (Desenhe abaixo):")
-                canvas_entrada = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_entrada", update_streamlit=True)
+                canvas_entrada = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_entrada")
+                
+                # Salva a assinatura na memória
+                img_entrada = obter_imagem_segura(canvas_entrada)
+                if img_entrada is not None:
+                    st.session_state["assinatura_entrada_memoria"] = img_entrada
                 
                 if st.button("Confirmar Devolução"):
                     if devolucao_selecionada != "Selecione...":
-                        if canvas_entrada.json_data is not None and len(canvas_entrada.json_data.get("objects", [])) > 0:
-                            assinatura_b64 = array_to_base64(canvas_entrada.image_data)
+                        assinatura_salva_ent = st.session_state.get("assinatura_entrada_memoria")
+                        
+                        if assinatura_salva_ent is not None:
+                            assinatura_b64 = array_to_base64(assinatura_salva_ent)
                             equip_lacre = devolucao_selecionada.split(") - ")[0] + ")"
                             equipamento_nome = equip_lacre.split(" (Lacre: ")[0]
                             lacre_numero = equip_lacre.split(" (Lacre: ")[1].replace(")", "")
@@ -138,6 +163,7 @@ if menu == "Registrar Movimentação":
                             aba_registros.update_cell(linha_sheet, 9, "Devolvido")
                             aba_registros.update_cell(linha_sheet, 10, tempo_uso)
                             
+                            st.session_state.pop("assinatura_entrada_memoria", None)
                             st.success("Devolução registrada com sucesso!")
                             st.rerun()
                         else:
