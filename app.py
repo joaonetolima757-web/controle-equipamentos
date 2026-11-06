@@ -15,11 +15,15 @@ from fpdf import FPDF
 
 st.set_page_config(page_title="Controle de Equipamentos", layout="wide")
 
-# Inicializa chaves para limpar o quadro automaticamente após salvar
+# Inicializa as variáveis de controle (Garante que a memória não se perca)
 if 'saida_key' not in st.session_state:
     st.session_state['saida_key'] = 0
 if 'entrada_key' not in st.session_state:
     st.session_state['entrada_key'] = 0
+if 'memoria_saida' not in st.session_state:
+    st.session_state['memoria_saida'] = None
+if 'memoria_entrada' not in st.session_state:
+    st.session_state['memoria_entrada'] = None
 
 @st.cache_resource
 def conectar_google_sheets():
@@ -101,26 +105,22 @@ if menu == "Registrar Movimentação":
         ferramenta_selecionada = st.selectbox("Ferramenta Disponível", ["Selecione..."] + disponiveis)
         st.write("Assinatura de Retirada (Desenhe abaixo):")
         
-        # O quadro de desenho com chave dinâmica para limpar sozinho
         canvas_saida = st_canvas(
             stroke_width=2, stroke_color="#000", background_color="#eee", 
             height=150, width=400, drawing_mode="freedraw", 
             key=f"canvas_saida_{st.session_state['saida_key']}"
         )
         
-        # MEMÓRIA FOTOGRÁFICA: Salva o desenho na hora que é feito
+        # A MÁGICA ESTÁ AQUI: Só atualiza a memória se tiver um desenho novo. NUNCA apaga sozinho.
         try:
-            if canvas_saida.json_data is not None:
-                if len(canvas_saida.json_data.get("objects", [])) > 0:
-                    st.session_state['memoria_saida'] = canvas_saida.image_data
-                else:
-                    st.session_state['memoria_saida'] = None
+            if canvas_saida.json_data is not None and len(canvas_saida.json_data.get("objects", [])) > 0:
+                st.session_state['memoria_saida'] = canvas_saida.image_data
         except Exception:
             pass
         
         if st.button("Confirmar Saída"):
             if colab_selecionado != "Selecione..." and ferramenta_selecionada != "Selecione...":
-                # Pega a imagem salva da memória (não do quadro que dá erro)
+                # Puxa a imagem salva na memória blindada
                 img_saida = st.session_state.get('memoria_saida')
                 
                 if img_saida is not None:
@@ -134,7 +134,7 @@ if menu == "Registrar Movimentação":
                     novo_registro = [novo_id, equipamento_nome, lacre_numero, colab_selecionado, data_saida, assinatura_b64, "", "", "Em uso", 0.0]
                     aba_registros.append_row(novo_registro)
                     
-                    # Limpa a memória e reinicia o quadro
+                    # Após salvar com sucesso, limpa a memória e o quadro
                     st.session_state['memoria_saida'] = None
                     st.session_state['saida_key'] += 1
                     st.success("Saída registrada com sucesso!")
@@ -158,13 +158,10 @@ if menu == "Registrar Movimentação":
                     key=f"canvas_entrada_{st.session_state['entrada_key']}"
                 )
                 
-                # MEMÓRIA FOTOGRÁFICA DA ENTRADA
+                # A MÁGICA DA ENTRADA: Mesma blindagem.
                 try:
-                    if canvas_entrada.json_data is not None:
-                        if len(canvas_entrada.json_data.get("objects", [])) > 0:
-                            st.session_state['memoria_entrada'] = canvas_entrada.image_data
-                        else:
-                            st.session_state['memoria_entrada'] = None
+                    if canvas_entrada.json_data is not None and len(canvas_entrada.json_data.get("objects", [])) > 0:
+                        st.session_state['memoria_entrada'] = canvas_entrada.image_data
                 except Exception:
                     pass
                 
@@ -193,7 +190,7 @@ if menu == "Registrar Movimentação":
                             aba_registros.update_cell(linha_sheet, 9, "Devolvido")
                             aba_registros.update_cell(linha_sheet, 10, tempo_uso)
                             
-                            # Limpa a memória e reinicia o quadro
+                            # Após salvar com sucesso, limpa a memória e o quadro
                             st.session_state['memoria_entrada'] = None
                             st.session_state['entrada_key'] += 1
                             st.success("Devolução registrada com sucesso!")
