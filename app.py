@@ -15,6 +15,12 @@ from fpdf import FPDF
 
 st.set_page_config(page_title="Controle de Equipamentos", layout="wide")
 
+# Inicializa chaves para limpar o quadro automaticamente após salvar
+if 'saida_key' not in st.session_state:
+    st.session_state['saida_key'] = 0
+if 'entrada_key' not in st.session_state:
+    st.session_state['entrada_key'] = 0
+
 @st.cache_resource
 def conectar_google_sheets():
     try:
@@ -95,22 +101,29 @@ if menu == "Registrar Movimentação":
         ferramenta_selecionada = st.selectbox("Ferramenta Disponível", ["Selecione..."] + disponiveis)
         st.write("Assinatura de Retirada (Desenhe abaixo):")
         
-        canvas_saida = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_saida", update_streamlit=True)
+        # O quadro de desenho com chave dinâmica para limpar sozinho
+        canvas_saida = st_canvas(
+            stroke_width=2, stroke_color="#000", background_color="#eee", 
+            height=150, width=400, drawing_mode="freedraw", 
+            key=f"canvas_saida_{st.session_state['saida_key']}"
+        )
+        
+        # MEMÓRIA FOTOGRÁFICA: Salva o desenho na hora que é feito
+        try:
+            if canvas_saida.json_data is not None:
+                if len(canvas_saida.json_data.get("objects", [])) > 0:
+                    st.session_state['memoria_saida'] = canvas_saida.image_data
+                else:
+                    st.session_state['memoria_saida'] = None
+        except Exception:
+            pass
         
         if st.button("Confirmar Saída"):
             if colab_selecionado != "Selecione..." and ferramenta_selecionada != "Selecione...":
-                img_valida = False
-                img_saida = None
+                # Pega a imagem salva da memória (não do quadro que dá erro)
+                img_saida = st.session_state.get('memoria_saida')
                 
-                # BLINDAGEM CONTRA O ERRO: Ignora qualquer erro técnico da assinatura
-                try:
-                    img_saida = canvas_saida.image_data
-                    if img_saida is not None and np.sum(img_saida) > 0:
-                        img_valida = True
-                except Exception:
-                    pass
-                
-                if img_valida:
+                if img_saida is not None:
                     assinatura_b64 = array_to_base64(img_saida)
                     equipamento_nome = ferramenta_selecionada.split(" (Lacre: ")[0]
                     lacre_numero = ferramenta_selecionada.split(" (Lacre: ")[1].replace(")", "")
@@ -120,10 +133,14 @@ if menu == "Registrar Movimentação":
                     
                     novo_registro = [novo_id, equipamento_nome, lacre_numero, colab_selecionado, data_saida, assinatura_b64, "", "", "Em uso", 0.0]
                     aba_registros.append_row(novo_registro)
+                    
+                    # Limpa a memória e reinicia o quadro
+                    st.session_state['memoria_saida'] = None
+                    st.session_state['saida_key'] += 1
                     st.success("Saída registrada com sucesso!")
                     st.rerun()
                 else:
-                    st.warning("⚠️ Assinatura não identificada. Por favor, aguarde 1 segundo após desenhar e clique de novo.")
+                    st.warning("⚠️ Desenhe a assinatura no quadro acima antes de confirmar.")
             else:
                 st.warning("Selecione o colaborador e a ferramenta.")
 
@@ -135,22 +152,27 @@ if menu == "Registrar Movimentação":
                 devolucao_selecionada = st.selectbox("Ferramenta para Devolver", ["Selecione..."] + opcoes_devolucao.tolist())
                 st.write("Assinatura de Devolução (Desenhe abaixo):")
                 
-                canvas_entrada = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_entrada", update_streamlit=True)
+                canvas_entrada = st_canvas(
+                    stroke_width=2, stroke_color="#000", background_color="#eee", 
+                    height=150, width=400, drawing_mode="freedraw", 
+                    key=f"canvas_entrada_{st.session_state['entrada_key']}"
+                )
+                
+                # MEMÓRIA FOTOGRÁFICA DA ENTRADA
+                try:
+                    if canvas_entrada.json_data is not None:
+                        if len(canvas_entrada.json_data.get("objects", [])) > 0:
+                            st.session_state['memoria_entrada'] = canvas_entrada.image_data
+                        else:
+                            st.session_state['memoria_entrada'] = None
+                except Exception:
+                    pass
                 
                 if st.button("Confirmar Devolução"):
                     if devolucao_selecionada != "Selecione...":
-                        img_valida = False
-                        img_entrada = None
+                        img_entrada = st.session_state.get('memoria_entrada')
                         
-                        # BLINDAGEM CONTRA O ERRO NA ENTRADA
-                        try:
-                            img_entrada = canvas_entrada.image_data
-                            if img_entrada is not None and np.sum(img_entrada) > 0:
-                                img_valida = True
-                        except Exception:
-                            pass
-                            
-                        if img_valida:
+                        if img_entrada is not None:
                             assinatura_b64 = array_to_base64(img_entrada)
                             equip_lacre = devolucao_selecionada.split(") - ")[0] + ")"
                             equipamento_nome = equip_lacre.split(" (Lacre: ")[0]
@@ -171,10 +193,13 @@ if menu == "Registrar Movimentação":
                             aba_registros.update_cell(linha_sheet, 9, "Devolvido")
                             aba_registros.update_cell(linha_sheet, 10, tempo_uso)
                             
+                            # Limpa a memória e reinicia o quadro
+                            st.session_state['memoria_entrada'] = None
+                            st.session_state['entrada_key'] += 1
                             st.success("Devolução registrada com sucesso!")
                             st.rerun()
                         else:
-                            st.warning("⚠️ Assinatura não identificada. Por favor, aguarde 1 segundo após desenhar e clique de novo.")
+                            st.warning("⚠️ Desenhe a assinatura no quadro acima antes de confirmar.")
                     else:
                         st.warning("Selecione a ferramenta.")
             else:
