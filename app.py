@@ -29,7 +29,7 @@ def conectar_google_sheets():
         client = gspread.authorize(creds)
         
         # IMPORTANTE: Coloque o link da sua planilha abaixo!
-        planilha_url = "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=1708575817#gid=1708575817"
+        planilha_url = "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=0#gid=0"
         
         if "COLE_O_LINK" in planilha_url:
             return None, "Você esqueceu de colar o link real da planilha no código."
