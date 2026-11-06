@@ -2,3 +2,6 @@ streamlit
 pandas
 gspread
 google-auth
+streamlit-drawable-canvas
+Pillow
+fpdf
