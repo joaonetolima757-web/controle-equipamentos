@@ -53,11 +53,20 @@ except Exception:
     st.error("⚠️ Abas não encontradas na Planilha")
     st.stop()
 
-def carregar_dados(aba, colunas):
+def carregar_dados(aba, colunas_esperadas):
     dados = aba.get_all_records()
     if not dados:
-        return pd.DataFrame(columns=colunas)
-    return pd.DataFrame(dados)
+        return pd.DataFrame(columns=colunas_esperadas)
+    
+    df = pd.DataFrame(dados)
+    # Remove espaços invisíveis dos nomes das colunas
+    df.columns = df.columns.str.strip()
+    
+    # Garante que todas as colunas esperadas existam
+    for col in colunas_esperadas:
+        if col not in df.columns:
+            df[col] = None
+    return df
 
 df_registros = carregar_dados(aba_registros, ['ID', 'Equipamento', 'Lacre', 'Colaborador', 'Data_Hora_Saida', 'Assinatura_Saida', 'Data_Hora_Entrada', 'Assinatura_Entrada', 'Status', 'Tempo_Uso_Horas'])
 df_ferramentas = carregar_dados(aba_ferramentas, ['Equipamento', 'Lacre'])
@@ -65,10 +74,9 @@ df_colaboradores = carregar_dados(aba_colaboradores, ['Nome'])
 
 # ====================================================================
 # A SOLUÇÃO DEFINITIVA: Recriar o desenho via matemática (Coordenadas)
-# Isso bypassa 100% o bug do RuntimeError da biblioteca
 # ====================================================================
 def json_para_imagem(json_data):
-    img = Image.new("RGBA", (400, 150), (238, 238, 238, 255)) # Fundo cinza claro
+    img = Image.new("RGBA", (400, 150), (238, 238, 238, 255))
     draw = ImageDraw.Draw(img)
 
     if json_data and "objects" in json_data:
@@ -77,7 +85,6 @@ def json_para_imagem(json_data):
                 path = obj.get("path", [])
                 points = []
                 for cmd in path:
-                    # Extrai as coordenadas X e Y exatas de cada traço
                     if len(cmd) >= 3 and isinstance(cmd[-1], (int, float)) and isinstance(cmd[-2], (int, float)):
                         points.append((cmd[-2], cmd[-1]))
                 if len(points) > 1:
@@ -130,7 +137,6 @@ if menu == "Registrar Movimentação":
         if st.button("Confirmar Saída"):
             if colab_selecionado != "Selecione..." and ferramenta_selecionada != "Selecione...":
                 
-                # FIM DO ERRO: Não pedimos a imagem, nós lemos os dados matemáticos (json) que NUNCA falham!
                 if canvas_saida.json_data is not None and len(canvas_saida.json_data.get("objects", [])) > 0:
                     
                     img_gerada_matematicamente = json_para_imagem(canvas_saida.json_data)
@@ -170,7 +176,6 @@ if menu == "Registrar Movimentação":
                 if st.button("Confirmar Devolução"):
                     if devolucao_selecionada != "Selecione...":
                         
-                        # MESMA SOLUÇÃO AQUI: Lemos os dados matemáticos!
                         if canvas_entrada.json_data is not None and len(canvas_entrada.json_data.get("objects", [])) > 0:
                             
                             img_gerada_matematicamente_ent = json_para_imagem(canvas_entrada.json_data)
@@ -183,7 +188,7 @@ if menu == "Registrar Movimentação":
                             
                             linha_df = em_uso[(em_uso['Equipamento'] == equipamento_nome) & (em_uso['Lacre'].astype(str) == str(lacre_numero)) & (em_uso['Colaborador'] == colab_nome)].iloc[0]
                             id_registro = linha_df['ID']
-                            data_saida = datetime.strptime(linha_df['Data_Hora_Saida'], "%Y-%m-%d %H:%M:%S")
+                            data_saida = datetime.strptime(str(linha_df['Data_Hora_Saida']), "%Y-%m-%d %H:%M:%S")
                             data_entrada = datetime.now()
                             tempo_uso = round((data_entrada - data_saida).total_seconds() / 3600, 2)
                             
