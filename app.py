@@ -23,7 +23,7 @@ def conectar_google_sheets():
     client = gspread.authorize(creds)
     
     # IMPORTANTE: Coloque o link da sua planilha abaixo!
-    planilha_url = "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=1708575817#gid=1708575817"
+    planilha_url = "COLE_O_LINK_DA_SUA_PLANILHA_AQUI"
     
     planilha = client.open_by_url(planilha_url)
     return planilha
@@ -48,7 +48,7 @@ def array_to_base64(img_array):
         return ""
     # Remove o canal alpha e salva como RGB para evitar erros de transparência no PDF
     img = Image.fromarray((img_array).astype(np.uint8), mode='RGBA')
-    background = Image.new('RGBA', img.size, (255,255,255))
+    background = Image.new('RGBA', img.size, (255, 255, 255))
     alpha_composite = Image.alpha_composite(background, img)
     alpha_composite_3 = alpha_composite.convert('RGB')
     
@@ -68,7 +68,7 @@ if menu == "Registrar Movimentação":
         colab_lista = df_colaboradores['Nome'].dropna().astype(str).unique().tolist()
         colab_selecionado = st.selectbox("Colaborador Solicitante", ["Selecione..."] + colab_lista)
         
-        # Filtra apenas ferramentas que não estão em uso
+        # Filtra apenas ferramentas que não estão em uso (Bloqueio)
         if not df_ferramentas.empty:
             ferramentas_cadastradas = df_ferramentas['Equipamento'].astype(str) + " (Lacre: " + df_ferramentas['Lacre'].astype(str) + ")"
             if not df_registros.empty:
@@ -83,12 +83,12 @@ if menu == "Registrar Movimentação":
         ferramenta_selecionada = st.selectbox("Ferramenta Disponível", ["Selecione..."] + disponiveis)
         
         st.write("Assinatura de Retirada (Desenhe abaixo):")
-        canvas_saida = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_saida")
+        canvas_saida = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_saida", update_streamlit=True)
         
         if st.button("Confirmar Saída"):
             if colab_selecionado != "Selecione..." and ferramenta_selecionada != "Selecione...":
-                # Verifica se o usuário realmente desenhou algo usando os dados em JSON (objects)
-                if canvas_saida.json_data is not None and len(canvas_saida.json_data["objects"]) > 0:
+                # Verifica se o usuário realmente desenhou algo
+                if canvas_saida.json_data is not None and len(canvas_saida.json_data.get("objects", [])) > 0:
                     assinatura_b64 = array_to_base64(canvas_saida.image_data)
                     equipamento_nome = ferramenta_selecionada.split(" (Lacre: ")[0]
                     lacre_numero = ferramenta_selecionada.split(" (Lacre: ")[1].replace(")", "")
@@ -113,11 +113,11 @@ if menu == "Registrar Movimentação":
                 devolucao_selecionada = st.selectbox("Ferramenta para Devolver", ["Selecione..."] + opcoes_devolucao.tolist())
                 
                 st.write("Assinatura de Devolução (Desenhe abaixo):")
-                canvas_entrada = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_entrada")
+                canvas_entrada = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_entrada", update_streamlit=True)
                 
                 if st.button("Confirmar Devolução"):
                     if devolucao_selecionada != "Selecione...":
-                        if canvas_entrada.json_data is not None and len(canvas_entrada.json_data["objects"]) > 0:
+                        if canvas_entrada.json_data is not None and len(canvas_entrada.json_data.get("objects", [])) > 0:
                             assinatura_b64 = array_to_base64(canvas_entrada.image_data)
                             equip_lacre = devolucao_selecionada.split(") - ")[0] + ")"
                             equipamento_nome = equip_lacre.split(" (Lacre: ")[0]
