@@ -10,6 +10,7 @@ import base64
 import uuid
 import tempfile
 import os
+import numpy as np
 from fpdf import FPDF
 
 st.set_page_config(page_title="Controle de Equipamentos", layout="wide")
@@ -22,7 +23,7 @@ def conectar_google_sheets():
     client = gspread.authorize(creds)
     
     # IMPORTANTE: Coloque o link da sua planilha abaixo!
-    planilha_url = "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=0#gid=0"
+    planilha_url = "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=1708575817#gid=1708575817"
     
     planilha = client.open_by_url(planilha_url)
     return planilha
@@ -43,9 +44,16 @@ df_ferramentas = carregar_dados(aba_ferramentas, ['Equipamento', 'Lacre'])
 df_colaboradores = carregar_dados(aba_colaboradores, ['Nome'])
 
 def array_to_base64(img_array):
-    img = Image.fromarray(img_array.astype('uint8'), 'RGBA')
+    if img_array is None:
+        return ""
+    # Remove o canal alpha e salva como RGB para evitar erros de transparência no PDF
+    img = Image.fromarray((img_array).astype(np.uint8), mode='RGBA')
+    background = Image.new('RGBA', img.size, (255,255,255))
+    alpha_composite = Image.alpha_composite(background, img)
+    alpha_composite_3 = alpha_composite.convert('RGB')
+    
     buffered = io.BytesIO()
-    img.save(buffered, format="PNG")
+    alpha_composite_3.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 # --- Interface do Sistema ---
@@ -79,7 +87,8 @@ if menu == "Registrar Movimentação":
         
         if st.button("Confirmar Saída"):
             if colab_selecionado != "Selecione..." and ferramenta_selecionada != "Selecione...":
-                if canvas_saida.image_data is not None:
+                # Verifica se o usuário realmente desenhou algo usando os dados em JSON (objects)
+                if canvas_saida.json_data is not None and len(canvas_saida.json_data["objects"]) > 0:
                     assinatura_b64 = array_to_base64(canvas_saida.image_data)
                     equipamento_nome = ferramenta_selecionada.split(" (Lacre: ")[0]
                     lacre_numero = ferramenta_selecionada.split(" (Lacre: ")[1].replace(")", "")
@@ -108,7 +117,7 @@ if menu == "Registrar Movimentação":
                 
                 if st.button("Confirmar Devolução"):
                     if devolucao_selecionada != "Selecione...":
-                        if canvas_entrada.image_data is not None:
+                        if canvas_entrada.json_data is not None and len(canvas_entrada.json_data["objects"]) > 0:
                             assinatura_b64 = array_to_base64(canvas_entrada.image_data)
                             equip_lacre = devolucao_selecionada.split(") - ")[0] + ")"
                             equipamento_nome = equip_lacre.split(" (Lacre: ")[0]
@@ -165,7 +174,7 @@ elif menu == "Relatórios e PDF":
     if df_registros.empty:
         st.info("Nenhum registro encontrado.")
     else:
-        df_view = df_registros.drop(columns=['Assinatura_Saida', 'Assinatura_Entrada', 'ID'])
+        df_view = df_registros.drop(columns=['Assinatura_Saida', 'Assinatura_Entrada', 'ID'], errors='ignore')
         st.dataframe(df_view, use_container_width=True)
         
         if st.button("Gerar Relatório PDF"):
@@ -178,10 +187,10 @@ elif menu == "Relatórios e PDF":
                 for _, row in df_registros.iterrows():
                     pdf.ln(5)
                     pdf.set_font("Arial", 'B', 10)
-                    pdf.cell(200, 6, txt=f"Equipamento: {row['Equipamento']} | Lacre: {row['Lacre']} | Colab: {row['Colaborador']}", ln=True)
+                    pdf.cell(200, 6, txt=f"Equipamento: {row.get('Equipamento','')} | Lacre: {row.get('Lacre','')} | Colab: {row.get('Colaborador','')}", ln=True)
                     pdf.set_font("Arial", size=9)
-                    pdf.cell(200, 6, txt=f"Saida: {row['Data_Hora_Saida']} | Entrada: {row['Data_Hora_Entrada']} | Uso: {row['Tempo_Uso_Horas']}h", ln=True)
-                    pdf.cell(200, 6, txt=f"Status: {row['Status']}", ln=True)
+                    pdf.cell(200, 6, txt=f"Saida: {row.get('Data_Hora_Saida','')} | Entrada: {row.get('Data_Hora_Entrada','')} | Uso: {row.get('Tempo_Uso_Horas','')}h", ln=True)
+                    pdf.cell(200, 6, txt=f"Status: {row.get('Status','')}", ln=True)
                     
                     y_img = pdf.get_y()
                     
@@ -189,17 +198,17 @@ elif menu == "Relatórios e PDF":
                         if pd.notna(b64_str) and b64_str != "":
                             try:
                                 img_data = base64.b64decode(b64_str)
-                                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
                                     tmp.write(img_data)
                                     tmp_path = tmp.name
                                 pdf.text(x_pos, y_img + 5, rotulo)
                                 pdf.image(tmp_path, x=x_pos, y=y_img + 7, w=30)
                                 os.remove(tmp_path)
                             except:
-                                pass
+                                pdf.text(x_pos, y_img + 5, rotulo + " (Erro imagem)")
                                 
-                    add_assinatura(row['Assinatura_Saida'], "Ass. Saida:", 10)
-                    add_assinatura(row['Assinatura_Entrada'], "Ass. Entrada:", 60)
+                    add_assinatura(row.get('Assinatura_Saida',''), "Ass. Saida:", 10)
+                    add_assinatura(row.get('Assinatura_Entrada',''), "Ass. Entrada:", 60)
                     
                     pdf.set_y(y_img + 25)
                     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
