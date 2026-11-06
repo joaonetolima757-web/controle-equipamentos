@@ -15,15 +15,11 @@ from fpdf import FPDF
 
 st.set_page_config(page_title="Controle de Equipamentos", layout="wide")
 
-# Inicializa as variáveis de controle (Garante que a memória não se perca)
+# Inicializa as chaves para resetar o quadro automaticamente
 if 'saida_key' not in st.session_state:
     st.session_state['saida_key'] = 0
 if 'entrada_key' not in st.session_state:
     st.session_state['entrada_key'] = 0
-if 'memoria_saida' not in st.session_state:
-    st.session_state['memoria_saida'] = None
-if 'memoria_entrada' not in st.session_state:
-    st.session_state['memoria_entrada'] = None
 
 @st.cache_resource
 def conectar_google_sheets():
@@ -68,16 +64,20 @@ df_registros = carregar_dados(aba_registros, ['ID', 'Equipamento', 'Lacre', 'Col
 df_ferramentas = carregar_dados(aba_ferramentas, ['Equipamento', 'Lacre'])
 df_colaboradores = carregar_dados(aba_colaboradores, ['Nome'])
 
+# Converte a imagem com blindagem total contra erros
 def array_to_base64(img_array):
     if img_array is None:
         return ""
-    img = Image.fromarray((img_array).astype(np.uint8), mode='RGBA')
-    background = Image.new('RGBA', img.size, (255, 255, 255))
-    alpha_composite = Image.alpha_composite(background, img)
-    alpha_composite_3 = alpha_composite.convert('RGB')
-    buffered = io.BytesIO()
-    alpha_composite_3.save(buffered, format="JPEG")
-    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+    try:
+        img = Image.fromarray((img_array).astype(np.uint8), mode='RGBA')
+        background = Image.new('RGBA', img.size, (255, 255, 255))
+        alpha_composite = Image.alpha_composite(background, img)
+        alpha_composite_3 = alpha_composite.convert('RGB')
+        buffered = io.BytesIO()
+        alpha_composite_3.save(buffered, format="JPEG")
+        return base64.b64encode(buffered.getvalue()).decode("utf-8")
+    except Exception:
+        return ""
 
 # --- Interface do Sistema ---
 st.title("Controle de Ferramentas - Almoxarifado")
@@ -111,20 +111,11 @@ if menu == "Registrar Movimentação":
             key=f"canvas_saida_{st.session_state['saida_key']}"
         )
         
-        # A MÁGICA ESTÁ AQUI: Só atualiza a memória se tiver um desenho novo. NUNCA apaga sozinho.
-        try:
-            if canvas_saida.json_data is not None and len(canvas_saida.json_data.get("objects", [])) > 0:
-                st.session_state['memoria_saida'] = canvas_saida.image_data
-        except Exception:
-            pass
-        
         if st.button("Confirmar Saída"):
             if colab_selecionado != "Selecione..." and ferramenta_selecionada != "Selecione...":
-                # Puxa a imagem salva na memória blindada
-                img_saida = st.session_state.get('memoria_saida')
-                
-                if img_saida is not None:
-                    assinatura_b64 = array_to_base64(img_saida)
+                # FIM DA BUROCRACIA: Pega a imagem direto, sem perguntas!
+                if canvas_saida.image_data is not None:
+                    assinatura_b64 = array_to_base64(canvas_saida.image_data)
                     equipamento_nome = ferramenta_selecionada.split(" (Lacre: ")[0]
                     lacre_numero = ferramenta_selecionada.split(" (Lacre: ")[1].replace(")", "")
                     
@@ -134,13 +125,11 @@ if menu == "Registrar Movimentação":
                     novo_registro = [novo_id, equipamento_nome, lacre_numero, colab_selecionado, data_saida, assinatura_b64, "", "", "Em uso", 0.0]
                     aba_registros.append_row(novo_registro)
                     
-                    # Após salvar com sucesso, limpa a memória e o quadro
-                    st.session_state['memoria_saida'] = None
                     st.session_state['saida_key'] += 1
                     st.success("Saída registrada com sucesso!")
                     st.rerun()
                 else:
-                    st.warning("⚠️ Desenhe a assinatura no quadro acima antes de confirmar.")
+                    st.warning("Aguarde o quadro carregar completamente.")
             else:
                 st.warning("Selecione o colaborador e a ferramenta.")
 
@@ -158,19 +147,10 @@ if menu == "Registrar Movimentação":
                     key=f"canvas_entrada_{st.session_state['entrada_key']}"
                 )
                 
-                # A MÁGICA DA ENTRADA: Mesma blindagem.
-                try:
-                    if canvas_entrada.json_data is not None and len(canvas_entrada.json_data.get("objects", [])) > 0:
-                        st.session_state['memoria_entrada'] = canvas_entrada.image_data
-                except Exception:
-                    pass
-                
                 if st.button("Confirmar Devolução"):
                     if devolucao_selecionada != "Selecione...":
-                        img_entrada = st.session_state.get('memoria_entrada')
-                        
-                        if img_entrada is not None:
-                            assinatura_b64 = array_to_base64(img_entrada)
+                        if canvas_entrada.image_data is not None:
+                            assinatura_b64 = array_to_base64(canvas_entrada.image_data)
                             equip_lacre = devolucao_selecionada.split(") - ")[0] + ")"
                             equipamento_nome = equip_lacre.split(" (Lacre: ")[0]
                             lacre_numero = equip_lacre.split(" (Lacre: ")[1].replace(")", "")
@@ -190,13 +170,11 @@ if menu == "Registrar Movimentação":
                             aba_registros.update_cell(linha_sheet, 9, "Devolvido")
                             aba_registros.update_cell(linha_sheet, 10, tempo_uso)
                             
-                            # Após salvar com sucesso, limpa a memória e o quadro
-                            st.session_state['memoria_entrada'] = None
                             st.session_state['entrada_key'] += 1
                             st.success("Devolução registrada com sucesso!")
                             st.rerun()
                         else:
-                            st.warning("⚠️ Desenhe a assinatura no quadro acima antes de confirmar.")
+                            st.warning("Aguarde o quadro carregar completamente.")
                     else:
                         st.warning("Selecione a ferramenta.")
             else:
