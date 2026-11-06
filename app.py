@@ -59,10 +59,8 @@ def carregar_dados(aba, colunas_esperadas):
         return pd.DataFrame(columns=colunas_esperadas)
     
     df = pd.DataFrame(dados)
-    # Remove espaços invisíveis dos nomes das colunas
     df.columns = df.columns.str.strip()
     
-    # Garante que todas as colunas esperadas existam
     for col in colunas_esperadas:
         if col not in df.columns:
             df[col] = None
@@ -73,7 +71,7 @@ df_ferramentas = carregar_dados(aba_ferramentas, ['Equipamento', 'Lacre'])
 df_colaboradores = carregar_dados(aba_colaboradores, ['Nome'])
 
 # ====================================================================
-# A SOLUÇÃO DEFINITIVA: Recriar o desenho via matemática (Coordenadas)
+# CORREÇÃO DA ASSINATURA: Forçando a linha a ser desenhada de cor preta (black)
 # ====================================================================
 def json_para_imagem(json_data):
     img = Image.new("RGBA", (400, 150), (238, 238, 238, 255))
@@ -88,10 +86,11 @@ def json_para_imagem(json_data):
                     if len(cmd) >= 3 and isinstance(cmd[-1], (int, float)) and isinstance(cmd[-2], (int, float)):
                         points.append((cmd[-2], cmd[-1]))
                 if len(points) > 1:
-                    draw.line(points, fill="#000000", width=2, joint="curve")
+                    # Traço preto garantido
+                    draw.line(points, fill="black", width=3, joint="curve")
                 elif len(points) == 1:
                     x, y = points[0]
-                    draw.ellipse([x-1, y-1, x+1, y+1], fill="#000000")
+                    draw.ellipse([x-2, y-2, x+2, y+2], fill="black")
     return img
 
 def pil_to_base64(img):
