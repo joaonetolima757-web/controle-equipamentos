@@ -55,17 +55,6 @@ def array_to_base64(img_array):
     alpha_composite_3.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-# Função segura para pegar a assinatura ignorando erros da biblioteca
-def obter_imagem_segura(canvas_result):
-    if canvas_result is None:
-        return None
-    try:
-        if canvas_result.json_data is not None and len(canvas_result.json_data.get("objects", [])) > 0:
-            return canvas_result.image_data
-    except Exception:
-        pass
-    return None
-
 # --- Interface do Sistema ---
 st.title("Controle de Ferramentas - Almoxarifado")
 menu = st.sidebar.selectbox("Navegação", ["Registrar Movimentação", "Cadastros", "Relatórios e PDF"])
@@ -94,34 +83,30 @@ if menu == "Registrar Movimentação":
         st.write("Assinatura de Retirada (Desenhe abaixo):")
         canvas_saida = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_saida")
         
-        # Salva a assinatura na memória assim que o usuário termina o traço
-        img_saida = obter_imagem_segura(canvas_saida)
-        if img_saida is not None:
-            st.session_state["assinatura_saida_memoria"] = img_saida
-        
-        if st.button("Confirmar Saída"):
-            if colab_selecionado != "Selecione..." and ferramenta_selecionada != "Selecione...":
-                assinatura_salva = st.session_state.get("assinatura_saida_memoria")
-                
-                if assinatura_salva is not None:
-                    assinatura_b64 = array_to_base64(assinatura_salva)
-                    equipamento_nome = ferramenta_selecionada.split(" (Lacre: ")[0]
-                    lacre_numero = ferramenta_selecionada.split(" (Lacre: ")[1].replace(")", "")
-                    
-                    novo_id = str(uuid.uuid4())
-                    data_saida = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    
-                    novo_registro = [novo_id, equipamento_nome, lacre_numero, colab_selecionado, data_saida, assinatura_b64, "", "", "Em uso", 0.0]
-                    aba_registros.append_row(novo_registro)
-                    
-                    # Limpa a memória para o próximo
-                    st.session_state.pop("assinatura_saida_memoria", None)
-                    st.success("Saída registrada com sucesso!")
-                    st.rerun()
+        # O PULO DO GATO: A Caixa de Confirmação!
+        if st.checkbox("✅ Terminei de assinar (Marque para confirmar)", key="chk_saida"):
+            try:
+                img_saida = canvas_saida.image_data
+                if img_saida is not None and len(canvas_saida.json_data.get("objects", [])) > 0:
+                    if st.button("Confirmar Saída"):
+                        if colab_selecionado != "Selecione..." and ferramenta_selecionada != "Selecione...":
+                            assinatura_b64 = array_to_base64(img_saida)
+                            equipamento_nome = ferramenta_selecionada.split(" (Lacre: ")[0]
+                            lacre_numero = ferramenta_selecionada.split(" (Lacre: ")[1].replace(")", "")
+                            
+                            novo_id = str(uuid.uuid4())
+                            data_saida = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            
+                            novo_registro = [novo_id, equipamento_nome, lacre_numero, colab_selecionado, data_saida, assinatura_b64, "", "", "Em uso", 0.0]
+                            aba_registros.append_row(novo_registro)
+                            st.success("Saída registrada com sucesso!")
+                            st.rerun()
+                        else:
+                            st.warning("Selecione o colaborador e a ferramenta.")
                 else:
-                    st.warning("A assinatura é obrigatória.")
-            else:
-                st.warning("Selecione o colaborador e a ferramenta.")
+                    st.warning("Por favor, desenhe a assinatura antes de marcar a caixa.")
+            except RuntimeError:
+                st.error("O sistema carregou muito rápido. Desmarque a caixa, faça um pontinho no desenho e marque a caixa novamente.")
 
     with tab_entrada:
         if not df_registros.empty:
@@ -133,43 +118,40 @@ if menu == "Registrar Movimentação":
                 st.write("Assinatura de Devolução (Desenhe abaixo):")
                 canvas_entrada = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_entrada")
                 
-                # Salva a assinatura na memória
-                img_entrada = obter_imagem_segura(canvas_entrada)
-                if img_entrada is not None:
-                    st.session_state["assinatura_entrada_memoria"] = img_entrada
-                
-                if st.button("Confirmar Devolução"):
-                    if devolucao_selecionada != "Selecione...":
-                        assinatura_salva_ent = st.session_state.get("assinatura_entrada_memoria")
-                        
-                        if assinatura_salva_ent is not None:
-                            assinatura_b64 = array_to_base64(assinatura_salva_ent)
-                            equip_lacre = devolucao_selecionada.split(") - ")[0] + ")"
-                            equipamento_nome = equip_lacre.split(" (Lacre: ")[0]
-                            lacre_numero = equip_lacre.split(" (Lacre: ")[1].replace(")", "")
-                            colab_nome = devolucao_selecionada.split(") - ")[1]
-                            
-                            linha_df = em_uso[(em_uso['Equipamento'] == equipamento_nome) & (em_uso['Lacre'].astype(str) == str(lacre_numero)) & (em_uso['Colaborador'] == colab_nome)].iloc[0]
-                            id_registro = linha_df['ID']
-                            data_saida = datetime.strptime(linha_df['Data_Hora_Saida'], "%Y-%m-%d %H:%M:%S")
-                            data_entrada = datetime.now()
-                            tempo_uso = round((data_entrada - data_saida).total_seconds() / 3600, 2)
-                            
-                            celula = aba_registros.find(str(id_registro))
-                            linha_sheet = celula.row
-                            
-                            aba_registros.update_cell(linha_sheet, 7, data_entrada.strftime("%Y-%m-%d %H:%M:%S"))
-                            aba_registros.update_cell(linha_sheet, 8, assinatura_b64)
-                            aba_registros.update_cell(linha_sheet, 9, "Devolvido")
-                            aba_registros.update_cell(linha_sheet, 10, tempo_uso)
-                            
-                            st.session_state.pop("assinatura_entrada_memoria", None)
-                            st.success("Devolução registrada com sucesso!")
-                            st.rerun()
+                if st.checkbox("✅ Terminei de assinar (Marque para confirmar)", key="chk_entrada"):
+                    try:
+                        img_entrada = canvas_entrada.image_data
+                        if img_entrada is not None and len(canvas_entrada.json_data.get("objects", [])) > 0:
+                            if st.button("Confirmar Devolução"):
+                                if devolucao_selecionada != "Selecione...":
+                                    assinatura_b64 = array_to_base64(img_entrada)
+                                    equip_lacre = devolucao_selecionada.split(") - ")[0] + ")"
+                                    equipamento_nome = equip_lacre.split(" (Lacre: ")[0]
+                                    lacre_numero = equip_lacre.split(" (Lacre: ")[1].replace(")", "")
+                                    colab_nome = devolucao_selecionada.split(") - ")[1]
+                                    
+                                    linha_df = em_uso[(em_uso['Equipamento'] == equipamento_nome) & (em_uso['Lacre'].astype(str) == str(lacre_numero)) & (em_uso['Colaborador'] == colab_nome)].iloc[0]
+                                    id_registro = linha_df['ID']
+                                    data_saida = datetime.strptime(linha_df['Data_Hora_Saida'], "%Y-%m-%d %H:%M:%S")
+                                    data_entrada = datetime.now()
+                                    tempo_uso = round((data_entrada - data_saida).total_seconds() / 3600, 2)
+                                    
+                                    celula = aba_registros.find(str(id_registro))
+                                    linha_sheet = celula.row
+                                    
+                                    aba_registros.update_cell(linha_sheet, 7, data_entrada.strftime("%Y-%m-%d %H:%M:%S"))
+                                    aba_registros.update_cell(linha_sheet, 8, assinatura_b64)
+                                    aba_registros.update_cell(linha_sheet, 9, "Devolvido")
+                                    aba_registros.update_cell(linha_sheet, 10, tempo_uso)
+                                    
+                                    st.success("Devolução registrada com sucesso!")
+                                    st.rerun()
+                                else:
+                                    st.warning("Selecione a ferramenta.")
                         else:
-                            st.warning("A assinatura é obrigatória.")
-                    else:
-                        st.warning("Selecione a ferramenta.")
+                            st.warning("Por favor, desenhe a assinatura antes de marcar a caixa.")
+                    except RuntimeError:
+                        st.error("O sistema carregou muito rápido. Desmarque a caixa, faça um pontinho no desenho e marque a caixa novamente.")
             else:
                 st.info("Nenhuma ferramenta em uso no momento.")
 
