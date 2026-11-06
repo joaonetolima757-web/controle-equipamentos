@@ -17,21 +17,40 @@ st.set_page_config(page_title="Controle de Equipamentos", layout="wide")
 
 @st.cache_resource
 def conectar_google_sheets():
-    credenciais = dict(st.secrets["gcp_service_account"])
-    escopo = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds = Credentials.from_service_account_info(credenciais, scopes=escopo)
-    client = gspread.authorize(creds)
-    
-    # IMPORTANTE: Coloque o link da sua planilha abaixo!
-    planilha_url = "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=1708575817#gid=1708575817"
-    
-    planilha = client.open_by_url(planilha_url)
-    return planilha
+    try:
+        credenciais = dict(st.secrets["gcp_service_account"])
+        escopo = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        creds = Credentials.from_service_account_info(credenciais, scopes=escopo)
+        client = gspread.authorize(creds)
+        
+        # IMPORTANTE: Coloque o link da sua planilha abaixo!
+        planilha_url = "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=1708575817#gid=1708575817"
+        
+        if "COLE_O_LINK" in planilha_url:
+            return None, "Você esqueceu de colar o link real da planilha no código (linha 27)."
+            
+        planilha = client.open_by_url(planilha_url)
+        return planilha, None
+    except Exception as e:
+        return None, f"Verifique se o e-mail do robô tem permissão de Editor na planilha. (Erro técnico: {str(e)})"
 
-planilha = conectar_google_sheets()
-aba_registros = planilha.worksheet("Registros")
-aba_ferramentas = planilha.worksheet("Ferramentas")
-aba_colaboradores = planilha.worksheet("Colaboradores")
+planilha, erro_conexao = conectar_google_sheets()
+
+# MENSAGENS AMIGÁVEIS DE ERRO EM VEZ DA TELA VERMELHA
+if erro_conexao:
+    st.error("⚠️ **Problema de Conexão com o Google Sheets**")
+    st.warning(f"{erro_conexao}")
+    st.info("👉 **Como resolver:** Vá no GitHub (arquivo `app.py`), procure a linha 27 e substitua a frase 'COLE_O_LINK...' pelo link real da sua planilha do Google.")
+    st.stop()
+
+try:
+    aba_registros = planilha.worksheet("Registros")
+    aba_ferramentas = planilha.worksheet("Ferramentas")
+    aba_colaboradores = planilha.worksheet("Colaboradores")
+except Exception as e:
+    st.error("⚠️ **Abas não encontradas na Planilha**")
+    st.warning("Verifique se as abas (lá embaixo na planilha) se chamam exatamente: Registros, Ferramentas e Colaboradores.")
+    st.stop()
 
 def carregar_dados(aba, colunas):
     dados = aba.get_all_records()
@@ -83,7 +102,6 @@ if menu == "Registrar Movimentação":
         st.write("Assinatura de Retirada (Desenhe abaixo):")
         canvas_saida = st_canvas(stroke_width=2, stroke_color="#000", background_color="#eee", height=150, width=400, drawing_mode="freedraw", key="canvas_saida")
         
-        # O PULO DO GATO: A Caixa de Confirmação!
         if st.checkbox("✅ Terminei de assinar (Marque para confirmar)", key="chk_saida"):
             try:
                 img_saida = canvas_saida.image_data
