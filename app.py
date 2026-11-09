@@ -4,6 +4,7 @@ import io
 import json
 import os
 import tempfile
+import traceback
 import uuid
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
@@ -311,20 +312,26 @@ def desenha_assinatura(pdf, b64, x, y, larg, alt, texto_vazio):
         texto_em(pdf, x, y + alt / 2 - 2.5, larg, texto_vazio,
                  fonte=("Helvetica", "I", 8), cor=(150, 150, 150), align="C")
         return
+    caminho = None
     try:
         img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0)
+        # Salva em arquivo temporário (método que já funcionou com o fpdf2 deste app)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+            caminho = tmp.name
+        img.save(caminho, format="PNG")
         h_img = alt - 4
         w_img = h_img * img.width / img.height
         if w_img > larg - 4:
             w_img = larg - 4
             h_img = w_img * img.height / img.width
-        pdf.image(buf, x=x + (larg - w_img) / 2, y=y + (alt - h_img) / 2, w=w_img, h=h_img)
+        pdf.image(caminho, x=x + (larg - w_img) / 2, y=y + (alt - h_img) / 2, w=w_img, h=h_img)
     except Exception:
+        traceback.print_exc()  # o motivo aparece em "Gerenciar aplicativo" > logs
         texto_em(pdf, x, y + alt / 2 - 2.5, larg, "assinatura inválida",
                  fonte=("Helvetica", "I", 8), cor=(150, 150, 150), align="C")
+    finally:
+        if caminho and os.path.exists(caminho):
+            os.remove(caminho)
 
 
 def gerar_pdf(df, titulo_periodo):
