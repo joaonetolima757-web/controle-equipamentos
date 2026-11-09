@@ -268,58 +268,147 @@ def limpa(txt):
     return str(txt).encode("latin-1", "replace").decode("latin-1")
 
 
-def desenha_assinatura(pdf, b64, x, y):
-    pdf.rect(x, y, 50, 20)
+def data_br(texto):
+    """2026-11-09 08:23:10 -> 09/11/2026 08:23"""
+    try:
+        return datetime.strptime(texto, FORMATO).strftime("%d/%m/%Y %H:%M")
+    except (ValueError, TypeError):
+        return texto or ""
+
+
+class RelatorioPDF(FPDF):
+    def footer(self):
+        self.set_y(-12)
+        self.set_font("Helvetica", "", 8)
+        self.set_text_color(120, 120, 120)
+        self.cell(95, 5, limpa(f"Gerado em {agora():%d/%m/%Y %H:%M}"), align="L")
+        self.cell(0, 5, limpa("Página ") + f"{self.page_no()}/{{nb}}", align="R")
+        self.set_text_color(0, 0, 0)
+
+
+def cabe(pdf, texto, largura):
+    """Corta o texto com '...' se ele não couber na largura (mm) da fonte atual."""
+    texto = limpa(texto)
+    if pdf.get_string_width(texto) <= largura:
+        return texto
+    while texto and pdf.get_string_width(texto + "...") > largura:
+        texto = texto[:-1]
+    return texto + "..."
+
+
+def texto_em(pdf, x, y, largura, texto, fonte=("Helvetica", "", 10), cor=(20, 20, 20), align="L"):
+    pdf.set_font(*fonte)
+    pdf.set_text_color(*cor)
+    pdf.set_xy(x, y)
+    pdf.cell(largura, 5, cabe(pdf, texto, largura), align=align)
+
+
+def desenha_assinatura(pdf, b64, x, y, larg, alt, texto_vazio):
+    pdf.set_draw_color(190, 195, 205)
+    pdf.set_line_width(0.3)
+    pdf.rect(x, y, larg, alt)
     if not b64:
+        texto_em(pdf, x, y + alt / 2 - 2.5, larg, texto_vazio,
+                 fonte=("Helvetica", "I", 8), cor=(150, 150, 150), align="C")
         return
     try:
-        dados = base64.b64decode(b64)
-        img = Image.open(io.BytesIO(dados)).convert("RGB")
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-            caminho = tmp.name
-        img.save(caminho, format="PNG")
-        pdf.image(caminho, x=x, y=y, w=50, h=20)
-        os.remove(caminho)
+        img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        h_img = alt - 4
+        w_img = h_img * img.width / img.height
+        if w_img > larg - 4:
+            w_img = larg - 4
+            h_img = w_img * img.height / img.width
+        pdf.image(buf, x=x + (larg - w_img) / 2, y=y + (alt - h_img) / 2, w=w_img, h=h_img)
     except Exception:
-        pdf.set_xy(x + 2, y + 8)
-        pdf.set_font("Helvetica", "I", 8)
-        pdf.cell(46, 4, "assinatura invalida")
+        texto_em(pdf, x, y + alt / 2 - 2.5, larg, "assinatura inválida",
+                 fonte=("Helvetica", "I", 8), cor=(150, 150, 150), align="C")
 
 
 def gerar_pdf(df, titulo_periodo):
-    pdf = FPDF()
+    ESQ, LARG, ALT = 10, 190, 62  # margem, largura útil e altura de cada bloco (mm)
+    CINZA_RUIM = (110, 115, 125)
+
+    pdf = RelatorioPDF(format="A4")
+    pdf.alias_nb_pages()
     pdf.set_auto_page_break(False)
+    pdf.set_margins(ESQ, 10, ESQ)
     pdf.add_page()
-    pdf.set_font("Helvetica", "B", 15)
-    pdf.cell(0, 10, limpa("Relatorio de Movimentacao de Equipamentos"), ln=1, align="C")
-    pdf.set_font("Helvetica", "", 10)
-    pdf.cell(0, 6, limpa(f"Periodo: {titulo_periodo}"), ln=1, align="C")
-    pdf.ln(4)
 
+    # ----- cabeçalho
+    texto_em(pdf, ESQ, 10, LARG, "Relatório de Movimentação de Equipamentos",
+             fonte=("Helvetica", "B", 16), cor=(20, 20, 20))
+    texto_em(pdf, ESQ, 19, LARG, f"Período: {titulo_periodo}",
+             fonte=("Helvetica", "", 10), cor=CINZA_RUIM)
+
+    # ----- resumo
+    total = len(df)
+    devolvidos = int((df["Status"] == "Devolvido").sum())
+    em_uso = int((df["Status"] == "Em uso").sum())
+    horas = df["Tempo_Uso_Horas"].apply(para_float).sum()
+    pdf.set_fill_color(240, 242, 246)
+    pdf.rect(ESQ, 27, LARG, 13, style="F")
+    resumo = [("MOVIMENTAÇÕES", str(total)), ("DEVOLVIDOS", str(devolvidos)),
+              ("EM USO", str(em_uso)), ("TEMPO TOTAL DE USO", formata_tempo(horas))]
+    larg_col = LARG / len(resumo)
+    for i, (rotulo, valor) in enumerate(resumo):
+        x = ESQ + 3 + i * larg_col
+        texto_em(pdf, x, 28, larg_col - 3, rotulo, fonte=("Helvetica", "", 7), cor=CINZA_RUIM)
+        texto_em(pdf, x, 32.5, larg_col - 3, valor, fonte=("Helvetica", "B", 11), cor=(20, 20, 20))
+    pdf.set_y(46)
+
+    # ----- um bloco por movimentação
     for _, r in df.iterrows():
-        if pdf.get_y() > 235:
+        if pdf.get_y() + ALT > 278:
             pdf.add_page()
-        pdf.set_x(10)
-        pdf.set_font("Helvetica", "B", 11)
-        pdf.cell(0, 7, limpa(f"Equipamento: {r['Equipamento']} | Lacre: {r['Lacre']} | Colab: {r['Colaborador']}"), ln=1)
-        pdf.set_font("Helvetica", "", 10)
-        pdf.cell(0, 6, limpa(
-            f"Saida: {r['Data_Hora_Saida']} | Entrada: {r['Data_Hora_Entrada']} | Uso: {formata_tempo(r['Tempo_Uso_Horas'])}"
-        ), ln=1)
-        pdf.cell(0, 6, limpa(f"Status: {r['Status']}"), ln=1)
-        pdf.ln(1)
+            pdf.set_y(12)
+        y0 = pdf.get_y()
+        devolvido = r["Status"] == "Devolvido"
 
-        y = pdf.get_y()
-        pdf.set_xy(10, y)
-        pdf.cell(60, 5, "Ass. Saida:")
-        pdf.set_xy(80, y)
-        pdf.cell(60, 5, "Ass. Entrada:")
-        desenha_assinatura(pdf, r["Assinatura_Saida"], 10, y + 6)
-        if r["Status"] == "Devolvido":
-            desenha_assinatura(pdf, r["Assinatura_Entrada"], 80, y + 6)
-        pdf.set_y(y + 29)
-        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-        pdf.ln(4)
+        # moldura e faixa do topo
+        pdf.set_draw_color(200, 205, 214)
+        pdf.set_line_width(0.3)
+        pdf.rect(ESQ, y0, LARG, ALT)
+        pdf.set_fill_color(240, 242, 246)
+        pdf.rect(ESQ, y0, LARG, 10, style="DF")
+
+        texto_em(pdf, ESQ + 3, y0 + 2.5, 85, r["Equipamento"], fonte=("Helvetica", "B", 11))
+        texto_em(pdf, ESQ + 92, y0 + 2.5, 40, f"Lacre: {r['Lacre']}", fonte=("Helvetica", "", 10))
+        cor_status = (22, 128, 60) if devolvido else (180, 110, 0)
+        texto_em(pdf, ESQ + LARG - 55, y0 + 2.5, 52, str(r["Status"]).upper(),
+                 fonte=("Helvetica", "B", 10), cor=cor_status, align="R")
+
+        # dados em quatro colunas (rótulo pequeno em cima, valor embaixo)
+        campos = [
+            ("COLABORADOR", r["Colaborador"]),
+            ("SAÍDA", data_br(r["Data_Hora_Saida"])),
+            ("ENTRADA", data_br(r["Data_Hora_Entrada"]) if devolvido else "Ainda não devolvido"),
+            ("TEMPO DE USO", formata_tempo(r["Tempo_Uso_Horas"]) if devolvido else "-"),
+        ]
+        larg_campo = (LARG - 6) / 4
+        for i, (rotulo, valor) in enumerate(campos):
+            x = ESQ + 3 + i * larg_campo
+            texto_em(pdf, x, y0 + 13, larg_campo - 2, rotulo, fonte=("Helvetica", "", 7), cor=CINZA_RUIM)
+            texto_em(pdf, x, y0 + 17.5, larg_campo - 2, valor, fonte=("Helvetica", "B", 9.5))
+
+        pdf.set_draw_color(225, 228, 234)
+        pdf.line(ESQ + 3, y0 + 25.5, ESQ + LARG - 3, y0 + 25.5)
+
+        # assinaturas lado a lado
+        larg_ass = 89
+        x1 = ESQ + 3
+        x2 = x1 + larg_ass + 4
+        texto_em(pdf, x1, y0 + 27, larg_ass, "ASSINATURA DE SAÍDA", fonte=("Helvetica", "", 7), cor=CINZA_RUIM)
+        texto_em(pdf, x2, y0 + 27, larg_ass, "ASSINATURA DE ENTRADA", fonte=("Helvetica", "", 7), cor=CINZA_RUIM)
+        desenha_assinatura(pdf, r["Assinatura_Saida"], x1, y0 + 31.5, larg_ass, 26, "sem assinatura")
+        desenha_assinatura(
+            pdf, r["Assinatura_Entrada"] if devolvido else "", x2, y0 + 31.5, larg_ass, 26,
+            "aguardando devolução" if not devolvido else "sem assinatura",
+        )
+
+        pdf.set_y(y0 + ALT + 5)
 
     saida = pdf.output(dest="S")
     if isinstance(saida, str):
