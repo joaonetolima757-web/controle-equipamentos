@@ -1,311 +1,392 @@
-import streamlit as st
-import pandas as pd
-from datetime import datetime
-import gspread
-from google.oauth2.service_account import Credentials
-from streamlit_drawable_canvas import st_canvas
-from PIL import Image, ImageDraw
-import io
 import base64
-import uuid
-import tempfile
+import io
 import os
+import tempfile
+import uuid
+from datetime import datetime, date
+from zoneinfo import ZoneInfo
+
+import gspread
+import pandas as pd
+import streamlit as st
+from fpdf import FPDF
+from google.oauth2.service_account import Credentials
+from PIL import Image
+from streamlit_drawable_canvas import st_canvas
 
 st.set_page_config(page_title="Controle de Equipamentos", layout="wide")
 
-# Inicializa as chaves para resetar o quadro automaticamente
-if 'saida_key' not in st.session_state:
-    st.session_state['saida_key'] = 0
-if 'entrada_key' not in st.session_state:
-    st.session_state['entrada_key'] = 0
+FUSO = ZoneInfo("America/Sao_Paulo")
+FORMATO = "%Y-%m-%d %H:%M:%S"
 
-@st.cache_resource(ttl=600)
-def conectar_google_sheets():
+# Ordem EXATA das colunas da aba "Registros" (A até J)
+COLUNAS = [
+    "ID", "Equipamento", "Lacre", "Colaborador",
+    "Data_Hora_Saida", "Assinatura_Saida",
+    "Data_Hora_Entrada", "Assinatura_Entrada",
+    "Status", "Tempo_Uso_Horas",
+]
+
+# Cole o link da planilha aqui OU coloque em Secrets: planilha_url = "https://..."
+PLANILHA_URL = st.secrets.get("planilha_url", "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=0#gid=0")
+
+# Limite de uma célula do Google Sheets = 50.000 caracteres
+LIMITE_CELULA = 45000
+
+# Chaves para limpar o quadro de assinatura depois de salvar
+for chave in ("saida_key", "entrada_key"):
+    if chave not in st.session_state:
+        st.session_state[chave] = 0
+
+
+# ---------------------------------------------------------------- Google Sheets
+@st.cache_resource
+def conectar_planilha():
+    credenciais = dict(st.secrets["gcp_service_account"])
+    escopo = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(credenciais, scopes=escopo)
+    client = gspread.authorize(creds)
+    return client.open_by_url(PLANILHA_URL)
+
+
+def aba_registros():
+    return conectar_planilha().worksheet("Registros")
+
+
+def carregar_dados():
+    """Lê tudo como TEXTO (evita o Sheets converter número/data/vírgula)."""
+    valores = aba_registros().get_all_values()
+    if len(valores) <= 1:
+        return pd.DataFrame(columns=COLUNAS)
+    linhas = []
+    for r in valores[1:]:
+        r = (r + [""] * len(COLUNAS))[: len(COLUNAS)]
+        if any(c.strip() for c in r):
+            linhas.append(r)
+    return pd.DataFrame(linhas, columns=COLUNAS)
+
+
+def ler_lista(nome_aba, colunas_preferidas, qtd_colunas):
+    """Lê as abas Ferramentas / Colaboradores. Se não achar, devolve lista vazia."""
     try:
-        credenciais = dict(st.secrets["gcp_service_account"])
-        escopo = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds = Credentials.from_service_account_info(credenciais, scopes=escopo)
-        client = gspread.authorize(creds)
-        
-        # IMPORTANTE: Coloque o link da sua planilha abaixo!
-        planilha_url = "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=0#gid=0"
-        
-        if "COLE_O_LINK" in planilha_url:
-            return None, "Você esqueceu de colar o link real da planilha no código."
-            
-        planilha = client.open_by_url(planilha_url)
-        return planilha, None
-    except Exception as e:
-        return None, f"Erro técnico: {str(e)}"
-
-planilha, erro_conexao = conectar_google_sheets()
-
-if erro_conexao:
-    st.error("⚠️ Problema de Conexão com o Google Sheets.")
-    st.stop()
-
-try:
-    aba_registros = planilha.worksheet("Registros")
-    aba_ferramentas = planilha.worksheet("Ferramentas")
-    aba_colaboradores = planilha.worksheet("Colaboradores")
-except Exception:
-    st.error("⚠️ Abas não encontradas na Planilha.")
-    st.stop()
-
-# ====================================================================
-# O ESCUDO ANTI-SPAM: Só consulta o Google a cada 15 segundos!
-# ====================================================================
-@st.cache_data(ttl=15, show_spinner=False)
-def puxar_dados_planilha(nome_aba):
-    aba = planilha.worksheet(nome_aba)
-    return aba.get_all_records()
-
-def carregar_dados(nome_aba, colunas_esperadas):
-    try:
-        dados = puxar_dados_planilha(nome_aba)
-        if not dados:
-            return pd.DataFrame(columns=colunas_esperadas)
-        
-        df = pd.DataFrame(dados)
-        df.columns = df.columns.str.strip()
-        
-        for col in colunas_esperadas:
-            if col not in df.columns:
-                df[col] = None
-        return df
+        valores = conectar_planilha().worksheet(nome_aba).get_all_values()
     except Exception:
-        return pd.DataFrame(columns=colunas_esperadas)
+        return []
+    if len(valores) <= 1:
+        return []
+    cab = [c.strip().lower() for c in valores[0]]
+    idx = []
+    for nome in colunas_preferidas:
+        idx.append(cab.index(nome.lower()) if nome.lower() in cab else None)
+    if any(i is None for i in idx):
+        idx = list(range(qtd_colunas))
+    saida = []
+    for r in valores[1:]:
+        r = r + [""] * (max(idx) + 1 - len(r)) if len(r) <= max(idx) else r
+        item = tuple(r[i].strip() for i in idx)
+        if item[0]:
+            saida.append(item)
+    return saida
 
-df_registros = carregar_dados("Registros", ['ID', 'Equipamento', 'Lacre', 'Colaborador', 'Data_Hora_Saida', 'Assinatura_Saida', 'Data_Hora_Entrada', 'Assinatura_Entrada', 'Status', 'Tempo_Uso_Horas'])
-df_ferramentas = carregar_dados("Ferramentas", ['Equipamento', 'Lacre'])
-df_colaboradores = carregar_dados("Colaboradores", ['Nome'])
 
-# ====================================================================
-# CORREÇÃO DA ASSINATURA: Traço Preto e Grosso
-# ====================================================================
-def json_para_imagem(json_data):
-    img = Image.new("RGBA", (400, 150), (255, 255, 255, 255))
-    draw = ImageDraw.Draw(img)
+# ---------------------------------------------------------------- Assinatura
+def assinatura_para_base64(image_data):
+    """Converte o desenho do canvas em PNG pequeno (base64). None se estiver vazio."""
+    if image_data is None:
+        return None
+    img = Image.fromarray(image_data.astype("uint8"), "RGBA")
+    fundo = Image.new("RGB", img.size, "white")
+    fundo.paste(img, mask=img.split()[3])  # transparência -> branco
+    cinza = fundo.convert("L")
+    if cinza.getextrema()[0] > 200:  # nada desenhado
+        return None
+    cinza = cinza.resize((300, 120), Image.LANCZOS)
+    buf = io.BytesIO()
+    cinza.save(buf, format="PNG", optimize=True)
+    texto = base64.b64encode(buf.getvalue()).decode("ascii")
+    return texto if len(texto) <= LIMITE_CELULA else None
 
-    if json_data and "objects" in json_data:
-        for obj in json_data["objects"]:
-            if obj.get("type") == "path":
-                path = obj.get("path", [])
-                points = []
-                for cmd in path:
-                    if len(cmd) >= 3 and isinstance(cmd[-1], (int, float)) and isinstance(cmd[-2], (int, float)):
-                        points.append((cmd[-2], cmd[-1]))
-                if len(points) > 1:
-                    draw.line(points, fill="#000000", width=3, joint="curve")
-                elif len(points) == 1:
-                    x, y = points[0]
-                    draw.ellipse([x-2, y-2, x+2, y+2], fill="#000000")
-    return img
 
-def pil_to_base64(img):
-    if img is None:
-        return ""
-    img_rgb = img.convert('RGB')
-    buffered = io.BytesIO()
-    img_rgb.save(buffered, format="JPEG")
-    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+def campo_assinatura(chave):
+    return st_canvas(
+        fill_color="rgba(255,255,255,0)",
+        stroke_width=2,
+        stroke_color="#000000",
+        background_color="#ffffff",
+        height=120,
+        width=300,
+        drawing_mode="freedraw",
+        update_streamlit=True,
+        key=chave,
+    )
 
-# --- Interface do Sistema ---
-st.title("Controle de Ferramentas - Almoxarifado")
-menu = st.sidebar.selectbox("Navegação", ["Registrar Movimentação", "Cadastros", "Relatórios e PDF"])
+
+# ---------------------------------------------------------------- Utilidades
+def agora():
+    return datetime.now(FUSO).replace(tzinfo=None)
+
+
+def para_float(x):
+    try:
+        return float(str(x).replace(",", "."))
+    except ValueError:
+        return 0.0
+
+
+def formata_tempo(horas):
+    total_min = int(round(para_float(horas) * 60))
+    return f"{total_min // 60}h {total_min % 60:02d}min"
+
+
+def chave_equip(equip, lacre):
+    return f"{equip}|{lacre}"
+
+
+# ---------------------------------------------------------------- PDF
+def limpa(txt):
+    return str(txt).encode("latin-1", "replace").decode("latin-1")
+
+
+def desenha_assinatura(pdf, b64, x, y):
+    pdf.rect(x, y, 50, 20)
+    if not b64:
+        return
+    try:
+        dados = base64.b64decode(b64)
+        img = Image.open(io.BytesIO(dados)).convert("RGB")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+            caminho = tmp.name
+        img.save(caminho, format="PNG")
+        pdf.image(caminho, x=x, y=y, w=50, h=20)
+        os.remove(caminho)
+    except Exception:
+        pdf.set_xy(x + 2, y + 8)
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.cell(46, 4, "assinatura invalida")
+
+
+def gerar_pdf(df, titulo_periodo):
+    pdf = FPDF()
+    pdf.set_auto_page_break(False)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 15)
+    pdf.cell(0, 10, limpa("Relatorio de Movimentacao de Equipamentos"), ln=1, align="C")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, limpa(f"Periodo: {titulo_periodo}"), ln=1, align="C")
+    pdf.ln(4)
+
+    for _, r in df.iterrows():
+        if pdf.get_y() > 235:
+            pdf.add_page()
+        pdf.set_x(10)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, limpa(f"Equipamento: {r['Equipamento']} | Lacre: {r['Lacre']} | Colab: {r['Colaborador']}"), ln=1)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.cell(0, 6, limpa(
+            f"Saida: {r['Data_Hora_Saida']} | Entrada: {r['Data_Hora_Entrada']} | Uso: {formata_tempo(r['Tempo_Uso_Horas'])}"
+        ), ln=1)
+        pdf.cell(0, 6, limpa(f"Status: {r['Status']}"), ln=1)
+        pdf.ln(1)
+
+        y = pdf.get_y()
+        pdf.set_xy(10, y)
+        pdf.cell(60, 5, "Ass. Saida:")
+        pdf.set_xy(80, y)
+        pdf.cell(60, 5, "Ass. Entrada:")
+        desenha_assinatura(pdf, r["Assinatura_Saida"], 10, y + 6)
+        if r["Status"] == "Devolvido":
+            desenha_assinatura(pdf, r["Assinatura_Entrada"], 80, y + 6)
+        pdf.set_y(y + 29)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(4)
+
+    saida = pdf.output(dest="S")
+    if isinstance(saida, str):
+        saida = saida.encode("latin-1")
+    return bytes(saida)
+
+
+# ---------------------------------------------------------------- Interface
+st.title("Sistema de Controle de Equipamentos")
+menu = st.sidebar.selectbox("Navegação", ["Registrar Movimentação", "Relatórios"])
+
+if "msg" in st.session_state:
+    st.success(st.session_state.pop("msg"))
 
 if menu == "Registrar Movimentação":
-    st.header("Entrada e Saída de Ferramentas")
-    tab_saida, tab_entrada = st.tabs(["Registrar Saída (Retirada)", "Registrar Entrada (Devolução)"])
-    
-    with tab_saida:
-        colab_lista = df_colaboradores['Nome'].dropna().astype(str).unique().tolist()
-        colab_selecionado = st.selectbox("Colaborador Solicitante", ["Selecione..."] + colab_lista)
-        
-        if not df_ferramentas.empty:
-            ferramentas_cadastradas = df_ferramentas['Equipamento'].astype(str) + " (Lacre: " + df_ferramentas['Lacre'].astype(str) + ")"
-            if not df_registros.empty:
-                em_uso = df_registros[df_registros['Status'] == 'Em uso']
-                ferramentas_em_uso = em_uso['Equipamento'].astype(str) + " (Lacre: " + em_uso['Lacre'].astype(str) + ")"
-                disponiveis = ferramentas_cadastradas[~ferramentas_cadastradas.isin(ferramentas_em_uso)].tolist()
-            else:
-                disponiveis = ferramentas_cadastradas.tolist()
-        else:
-            disponiveis = []
-            
-        ferramenta_selecionada = st.selectbox("Ferramenta Disponível", ["Selecione..."] + disponiveis)
-        st.write("Assinatura de Retirada (Desenhe abaixo e clique em Confirmar):")
-        
-        # update_streamlit=False é o que impede o aplicativo de travar ao desenhar!
-        canvas_saida = st_canvas(
-            stroke_width=2, stroke_color="#000", background_color="#eee", 
-            height=150, width=400, drawing_mode="freedraw", 
-            update_streamlit=False, 
-            key=f"canvas_saida_{st.session_state['saida_key']}"
-        )
-        
-        if st.button("Confirmar Saída"):
-            if colab_selecionado != "Selecione..." and ferramenta_selecionada != "Selecione...":
-                
-                if canvas_saida.json_data is not None and len(canvas_saida.json_data.get("objects", [])) > 0:
-                    
-                    img_gerada_matematicamente = json_para_imagem(canvas_saida.json_data)
-                    assinatura_b64 = pil_to_base64(img_gerada_matematicamente)
-                    
-                    equipamento_nome = ferramenta_selecionada.split(" (Lacre: ")[0]
-                    lacre_numero = ferramenta_selecionada.split(" (Lacre: ")[1].replace(")", "")
-                    
-                    novo_id = str(uuid.uuid4())
-                    data_saida = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    
-                    novo_registro = [novo_id, equipamento_nome, lacre_numero, colab_selecionado, data_saida, assinatura_b64, "", "", "Em uso", 0.0]
-                    try:
-                        aba_registros.append_row(novo_registro)
-                        puxar_dados_planilha.clear() # Limpa o cache para atualizar imediatamente
-                        st.session_state['saida_key'] += 1
-                        st.success("Saída registrada com sucesso!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error("Erro ao salvar. Aguarde 10 segundos e tente novamente.")
-                else:
-                    st.warning("⚠️ Desenhe a assinatura no quadro acima antes de confirmar.")
-            else:
-                st.warning("Selecione o colaborador e a ferramenta.")
+    df = carregar_dados()
+    em_uso = df[df["Status"] == "Em uso"]
+    bloqueados = {chave_equip(r.Equipamento, r.Lacre) for r in em_uso.itertuples()}
 
-    with tab_entrada:
-        if not df_registros.empty:
-            em_uso = df_registros[df_registros['Status'] == 'Em uso']
-            if not em_uso.empty:
-                opcoes_devolucao = em_uso['Equipamento'].astype(str) + " (Lacre: " + em_uso['Lacre'].astype(str) + ") - " + em_uso['Colaborador'].astype(str)
-                devolucao_selecionada = st.selectbox("Ferramenta para Devolver", ["Selecione..."] + opcoes_devolucao.tolist())
-                st.write("Assinatura de Devolução (Desenhe abaixo e clique em Confirmar):")
-                
-                canvas_entrada = st_canvas(
-                    stroke_width=2, stroke_color="#000", background_color="#eee", 
-                    height=150, width=400, drawing_mode="freedraw", 
-                    update_streamlit=False,
-                    key=f"canvas_entrada_{st.session_state['entrada_key']}"
+    col1, col2 = st.columns(2)
+
+    # ---------------- SAÍDA
+    with col1:
+        st.subheader("Registrar Saída (Retirada)")
+
+        ferramentas = ler_lista("Ferramentas", ["Equipamento", "Lacre"], 2)
+        disponiveis = [f for f in ferramentas if chave_equip(f[0], f[1]) not in bloqueados]
+
+        if ferramentas:
+            if disponiveis:
+                escolha = st.selectbox(
+                    "Equipamento disponível",
+                    disponiveis,
+                    format_func=lambda f: f"{f[0]} | Lacre {f[1]}",
+                    key=f"equip_saida_{st.session_state.saida_key}",
                 )
-                
-                if st.button("Confirmar Devolução"):
-                    if devolucao_selecionada != "Selecione...":
-                        
-                        if canvas_entrada.json_data is not None and len(canvas_entrada.json_data.get("objects", [])) > 0:
-                            
-                            img_gerada_matematicamente_ent = json_para_imagem(canvas_entrada.json_data)
-                            assinatura_b64 = pil_to_base64(img_gerada_matematicamente_ent)
-                            
-                            equip_lacre = devolucao_selecionada.split(") - ")[0] + ")"
-                            equipamento_nome = equip_lacre.split(" (Lacre: ")[0]
-                            lacre_numero = equip_lacre.split(" (Lacre: ")[1].replace(")", "")
-                            colab_nome = devolucao_selecionada.split(") - ")[1]
-                            
-                            try:
-                                linha_df = em_uso[(em_uso['Equipamento'] == equipamento_nome) & (em_uso['Lacre'].astype(str) == str(lacre_numero)) & (em_uso['Colaborador'] == colab_nome)].iloc[0]
-                                id_registro = linha_df['ID']
-                                data_saida = datetime.strptime(str(linha_df['Data_Hora_Saida']), "%Y-%m-%d %H:%M:%S")
-                                data_entrada = datetime.now()
-                                tempo_uso = round((data_entrada - data_saida).total_seconds() / 3600, 2)
-                                
-                                celula = aba_registros.find(str(id_registro))
-                                linha_sheet = celula.row
-                                
-                                aba_registros.update_cell(linha_sheet, 7, data_entrada.strftime("%Y-%m-%d %H:%M:%S"))
-                                aba_registros.update_cell(linha_sheet, 8, assinatura_b64)
-                                aba_registros.update_cell(linha_sheet, 9, "Devolvido")
-                                aba_registros.update_cell(linha_sheet, 10, tempo_uso)
-                                
-                                puxar_dados_planilha.clear() # Limpa o cache
-                                st.session_state['entrada_key'] += 1
-                                st.success("Devolução registrada com sucesso!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error("Erro ao salvar. Aguarde 10 segundos e tente novamente.")
-                        else:
-                            st.warning("⚠️ Desenhe a assinatura no quadro acima antes de confirmar.")
-                    else:
-                        st.warning("Selecione a ferramenta.")
+                equip_saida, lacre_saida = escolha
             else:
-                st.info("Nenhuma ferramenta em uso no momento.")
+                st.warning("Todos os equipamentos estão em uso.")
+                equip_saida = lacre_saida = ""
+        else:
+            equip_saida = st.text_input("Equipamento", key=f"eq_txt_{st.session_state.saida_key}").strip().upper()
+            lacre_saida = st.text_input("Lacre", key=f"lacre_txt_{st.session_state.saida_key}").strip()
 
-elif menu == "Cadastros":
-    st.header("Cadastros do Sistema")
-    tab_colab, tab_ferr = st.tabs(["Novo Colaborador", "Nova Ferramenta"])
-    
-    with tab_colab:
-        novo_nome = st.text_input("Nome / Código do Colaborador (Ex: MECA 20)")
-        if st.button("Cadastrar Colaborador"):
-            if novo_nome:
-                try:
-                    aba_colaboradores.append_row([novo_nome])
-                    puxar_dados_planilha.clear()
-                    st.success("Colaborador cadastrado!")
-                    st.rerun()
-                except:
-                    st.error("Erro ao cadastrar. Tente novamente.")
-                
-    with tab_ferr:
-        nova_ferramenta = st.text_input("Nome da Ferramenta")
-        novo_lacre = st.text_input("Número do Lacre")
-        if st.button("Cadastrar Ferramenta"):
-            if nova_ferramenta and novo_lacre:
-                try:
-                    aba_ferramentas.append_row([nova_ferramenta, novo_lacre])
-                    puxar_dados_planilha.clear()
-                    st.success("Ferramenta cadastrada!")
-                    st.rerun()
-                except:
-                    st.error("Erro ao cadastrar. Tente novamente.")
+        colaboradores = [c[0] for c in ler_lista("Colaboradores", ["Colaborador"], 1)]
+        if colaboradores:
+            colab_saida = st.selectbox("Colaborador", colaboradores, key=f"colab_saida_{st.session_state.saida_key}")
+        else:
+            colab_saida = st.text_input("Colaborador", key=f"colab_txt_{st.session_state.saida_key}").strip().upper()
 
-elif menu == "Relatórios e PDF":
-    st.header("Relatório de Movimentações")
-    
-    if df_registros.empty:
-        st.info("Nenhum registro encontrado.")
+        st.write("Assinatura de saída:")
+        canvas_saida = campo_assinatura(f"canvas_saida_{st.session_state.saida_key}")
+
+        if st.button("Registrar Saída", type="primary"):
+            if not (equip_saida and colab_saida):
+                st.warning("Preencha equipamento e colaborador.")
+            else:
+                assinatura = assinatura_para_base64(canvas_saida.image_data)
+                if assinatura is None:
+                    st.warning("Assine no quadro antes de registrar.")
+                else:
+                    # Relê a planilha na hora de salvar (evita 2 pessoas pegarem o mesmo item)
+                    atual = carregar_dados()
+                    ocupado = atual[
+                        (atual["Status"] == "Em uso")
+                        & (atual["Equipamento"] == equip_saida)
+                        & (atual["Lacre"] == lacre_saida)
+                    ]
+                    if not ocupado.empty:
+                        st.error(f"'{equip_saida}' (lacre {lacre_saida}) já está em uso por {ocupado.iloc[-1]['Colaborador']}.")
+                    else:
+                        aba_registros().append_row(
+                            [
+                                uuid.uuid4().hex[:8], equip_saida, str(lacre_saida), colab_saida,
+                                agora().strftime(FORMATO), assinatura,
+                                "", "", "Em uso", 0.0,
+                            ],
+                            value_input_option="RAW",
+                        )
+                        st.session_state.saida_key += 1
+                        st.session_state.msg = f"Saída de '{equip_saida}' registrada para {colab_saida}!"
+                        st.rerun()
+
+    # ---------------- ENTRADA
+    with col2:
+        st.subheader("Registrar Entrada (Devolução)")
+        if em_uso.empty:
+            st.info("Nenhum equipamento em uso no momento.")
+        else:
+            opcoes = {
+                f"{r.Equipamento} | Lacre {r.Lacre} | {r.Colaborador} | saiu {r.Data_Hora_Saida}": r.ID
+                for r in em_uso.itertuples()
+            }
+            rotulo = st.selectbox("Equipamento em uso", list(opcoes.keys()), key=f"equip_entrada_{st.session_state.entrada_key}")
+
+            st.write("Assinatura de entrada:")
+            canvas_entrada = campo_assinatura(f"canvas_entrada_{st.session_state.entrada_key}")
+
+            if st.button("Registrar Entrada", type="primary"):
+                assinatura = assinatura_para_base64(canvas_entrada.image_data)
+                if assinatura is None:
+                    st.warning("Assine no quadro antes de registrar.")
+                else:
+                    id_reg = opcoes[rotulo]
+                    ws = aba_registros()
+                    atual = carregar_dados()
+                    linha_df = atual[(atual["ID"] == id_reg) & (atual["Status"] == "Em uso")]
+                    if linha_df.empty:
+                        st.error("Este equipamento já foi devolvido.")
+                    else:
+                        saida = datetime.strptime(linha_df.iloc[0]["Data_Hora_Saida"], FORMATO)
+                        entrada = agora()
+                        horas = round((entrada - saida).total_seconds() / 3600, 2)
+                        numero_linha = ws.col_values(1).index(id_reg) + 1
+                        ws.batch_update(
+                            [{
+                                "range": f"G{numero_linha}:J{numero_linha}",
+                                "values": [[entrada.strftime(FORMATO), assinatura, "Devolvido", horas]],
+                            }],
+                            value_input_option="RAW",
+                        )
+                        st.session_state.entrada_key += 1
+                        st.session_state.msg = f"Entrada registrada! Tempo de uso: {formata_tempo(horas)}."
+                        st.rerun()
+
+    st.divider()
+    st.subheader("Equipamentos em uso agora")
+    if em_uso.empty:
+        st.caption("Nenhum.")
     else:
-        df_view = df_registros.drop(columns=['Assinatura_Saida', 'Assinatura_Entrada', 'ID'], errors='ignore')
-        st.dataframe(df_view, use_container_width=True)
-        
-        if st.button("Gerar Relatório PDF"):
-            with st.spinner("Gerando PDF... Isso pode levar alguns segundos."):
-                from fpdf import FPDF
-                pdf = FPDF()
-                pdf.add_page()
-                pdf.set_font("Arial", 'B', 14)
-                pdf.cell(200, 10, txt="Relatorio de Movimentacao de Equipamentos", ln=True, align='C')
-                
-                for _, row in df_registros.iterrows():
-                    pdf.ln(5)
-                    pdf.set_font("Arial", 'B', 10)
-                    pdf.cell(200, 6, txt=f"Equipamento: {row.get('Equipamento','')} | Lacre: {row.get('Lacre','')} | Colab: {row.get('Colaborador','')}", ln=True)
-                    pdf.set_font("Arial", size=9)
-                    pdf.cell(200, 6, txt=f"Saida: {row.get('Data_Hora_Saida','')} | Entrada: {row.get('Data_Hora_Entrada','')} | Uso: {row.get('Tempo_Uso_Horas','')}h", ln=True)
-                    pdf.cell(200, 6, txt=f"Status: {row.get('Status','')}", ln=True)
-                    
-                    y_img = pdf.get_y()
-                    
-                    def add_assinatura(b64_str, rotulo, x_pos):
-                        if pd.notna(b64_str) and b64_str != "":
-                            try:
-                                img_data = base64.b64decode(b64_str)
-                                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                                    tmp.write(img_data)
-                                    tmp_path = tmp.name
-                                pdf.text(x_pos, y_img + 5, rotulo)
-                                pdf.image(tmp_path, x=x_pos, y=y_img + 7, w=30)
-                                os.remove(tmp_path)
-                            except:
-                                pdf.text(x_pos, y_img + 5, rotulo + " (Erro imagem)")
-                                
-                    add_assinatura(row.get('Assinatura_Saida',''), "Ass. Saida:", 10)
-                    add_assinatura(row.get('Assinatura_Entrada',''), "Ass. Entrada:", 60)
-                    
-                    pdf.set_y(y_img + 25)
-                    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-                
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-                    pdf.output(tmp_pdf.name)
-                    with open(tmp_pdf.name, "rb") as f:
-                        pdf_bytes = f.read()
-                
-                st.download_button(label="📥 Baixar PDF Final", data=pdf_bytes, file_name="relatorio_equipamentos.pdf", mime="application/pdf")
+        st.dataframe(
+            em_uso[["Equipamento", "Lacre", "Colaborador", "Data_Hora_Saida"]],
+            use_container_width=True, hide_index=True,
+        )
+
+else:
+    st.header("Painel de Relatórios")
+    df = carregar_dados()
+
+    if df.empty:
+        st.info("Ainda não há registros.")
+    else:
+        df["_saida"] = pd.to_datetime(df["Data_Hora_Saida"], errors="coerce")
+        df["Tempo_Uso_Horas"] = df["Tempo_Uso_Horas"].apply(para_float)
+
+        periodo = st.date_input(
+            "Filtrar por dia (escolha o mesmo dia duas vezes para um único dia)",
+            value=(date.today(), date.today()),
+            format="DD/MM/YYYY",
+        )
+        if isinstance(periodo, (tuple, list)):
+            inicio = periodo[0]
+            fim = periodo[1] if len(periodo) > 1 else periodo[0]
+        else:
+            inicio = fim = periodo
+
+        filtrado = df[(df["_saida"].dt.date >= inicio) & (df["_saida"].dt.date <= fim)].copy()
+        titulo = inicio.strftime("%d/%m/%Y") if inicio == fim else f"{inicio:%d/%m/%Y} a {fim:%d/%m/%Y}"
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Movimentações", len(filtrado))
+        c2.metric("Em uso", int((filtrado["Status"] == "Em uso").sum()))
+        c3.metric("Horas de uso", formata_tempo(filtrado["Tempo_Uso_Horas"].sum()))
+
+        if filtrado.empty:
+            st.info(f"Nenhuma movimentação em {titulo}.")
+        else:
+            tab1, tab2 = st.tabs(["Movimentações", "Resumo por equipamento"])
+            with tab1:
+                st.dataframe(
+                    filtrado[["Equipamento", "Lacre", "Colaborador", "Data_Hora_Saida",
+                              "Data_Hora_Entrada", "Status", "Tempo_Uso_Horas"]],
+                    use_container_width=True, hide_index=True,
+                )
+            with tab2:
+                resumo = (
+                    filtrado.groupby(["Equipamento", "Lacre"])["Tempo_Uso_Horas"]
+                    .sum().reset_index()
+                )
+                st.dataframe(resumo, use_container_width=True, hide_index=True)
+
+            pdf_bytes = gerar_pdf(filtrado.sort_values("_saida"), titulo)
+            st.download_button(
+                "Baixar relatório em PDF",
+                data=pdf_bytes,
+                file_name=f"relatorio_equipamentos_{inicio:%Y-%m-%d}_{fim:%Y-%m-%d}.pdf",
+                mime="application/pdf",
+            )
