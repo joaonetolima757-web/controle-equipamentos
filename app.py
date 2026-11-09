@@ -1,4 +1,5 @@
 import base64
+import html
 import io
 import json
 import os
@@ -70,6 +71,7 @@ def carregar_dados():
     return pd.DataFrame(linhas, columns=COLUNAS)
 
 
+@st.cache_data(ttl=120, show_spinner=False)
 def ler_lista(nome_aba, colunas_preferidas, qtd_colunas):
     """Lê as abas Ferramentas / Colaboradores. Se não achar, devolve lista vazia."""
     try:
@@ -222,13 +224,8 @@ def assinatura_para_base64(resultado):
     return None
 
 
-def aviso_sem_assinatura(resultado):
-    """Avisa que falta assinatura e mostra o que o quadro devolveu (diagnóstico)."""
+def aviso_sem_assinatura(resultado=None):
     st.warning("Assine no quadro antes de registrar.")
-    with st.expander("Detalhes técnicos (se você já assinou e este aviso apareceu)"):
-        dados = getattr(resultado, "json_data", "sem json_data")
-        st.write("Tipo do json_data:", type(dados).__name__)
-        st.code(repr(dados)[:1500])
 
 
 def campo_assinatura(chave):
@@ -236,9 +233,9 @@ def campo_assinatura(chave):
         fill_color="rgba(255,255,255,0)",
         stroke_width=2,
         stroke_color="#000000",
-        background_color="#ffffff",
+        background_color="#f4f6f9",
         height=120,
-        width=300,
+        width=340,
         drawing_mode="freedraw",
         update_streamlit=True,
         key=chave,
@@ -330,136 +327,337 @@ def gerar_pdf(df, titulo_periodo):
     return bytes(saida)
 
 
-# ---------------------------------------------------------------- Interface
-st.title("Sistema de Controle de Equipamentos")
-menu = st.sidebar.selectbox("Navegação", ["Registrar Movimentação", "Relatórios"])
+# ---------------------------------------------------------------- Interface (visual)
+CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+html, body, .stApp, .stApp * { font-family: 'Inter', sans-serif; }
+.stApp { background: #eef1f5; }
+header[data-testid="stHeader"] { background: transparent; }
+section[data-testid="stSidebar"] { background: #ffffff; }
+.block-container { max-width: 1200px; padding-top: 2.2rem; padding-bottom: 3rem; }
+
+/* cartões (containers com key começando por "card") */
+[class*="st-key-card"] {
+    background: #ffffff; border: 1px solid #e1e6ee; border-radius: 14px;
+    padding: 1.2rem 1.3rem; box-shadow: 0 1px 3px rgba(16,24,40,.06);
+}
+[class*="st-key-card"] h3 { margin: 0 0 .6rem 0; font-size: 1.25rem; font-weight: 600; color: #0f172a; }
+
+/* título */
+.tit { font-size: 2rem; font-weight: 700; color: #0f172a; margin: 0; line-height: 1.2; }
+.sub { color: #475569; margin: .2rem 0 0 0; }
+
+/* indicadores */
+.kpi { display: flex; align-items: center; gap: .9rem; background: #fff; border: 1px solid #e1e6ee;
+       border-radius: 14px; padding: 1.1rem 1.3rem; box-shadow: 0 1px 3px rgba(16,24,40,.06); }
+.kpi-ico { width: 52px; height: 52px; border-radius: 12px; display: flex; align-items: center; justify-content: center; }
+.kpi-t { color: #334155; font-size: .95rem; }
+.kpi-v { color: #0f172a; font-size: 1.9rem; font-weight: 700; line-height: 1.1; }
+
+/* tabela de devoluções */
+.th { font-size: .85rem; font-weight: 600; color: #475569; background: #f1f4f8; padding: .55rem .7rem; border-radius: 8px; }
+.mut { color: #64748b; font-size: .85rem; }
+.sep { border: 0; border-top: 1px solid #edf0f5; margin: .35rem 0; }
+.badge { display: inline-block; padding: .22rem .7rem; border-radius: 999px; font-size: .8rem; font-weight: 600; }
+.b-ok { background: #dcfce7; color: #15803d; }
+.b-warn { background: #fef3c7; color: #b45309; }
+
+/* campos */
+div[data-baseweb="select"] > div, div[data-baseweb="input"] > div, div[data-baseweb="base-input"] {
+    background: #ffffff !important; border: 1px solid #cdd5e0 !important; border-radius: 9px !important;
+}
+label p { font-weight: 600 !important; color: #0f172a; }
+
+/* botões */
+.stButton > button { border-radius: 10px; font-weight: 600; padding: .55rem 1rem; }
+.stButton > button[kind="secondary"] { background: #fff; border: 1px solid #cdd5e0; color: #0f172a; }
+.stButton > button[kind="primary"] { background: #e11d2e; border: 1px solid #e11d2e; color: #fff; }
+.stButton > button[kind="primary"]:hover { background: #bf1625; border-color: #bf1625; }
+
+/* quadro de assinatura */
+iframe[title*="st_canvas"] { border: 1.5px dashed #c3ccd8; border-radius: 12px; background: #f4f6f9; }
+.ass-legenda { text-align: center; color: #64748b; font-size: .85rem; margin-top: -.2rem; }
+
+/* indicadores do relatório */
+[data-testid="stMetric"] { background: #fff; border: 1px solid #e1e6ee; border-radius: 14px; padding: 1rem 1.2rem; }
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
+
+ICONE_OK = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l3 3 5-6"/></svg>'
+ICONE_USO = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></svg>'
+ICONE_ALERTA = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18v.01"/></svg>'
+
+
+def card_indicador(icone, fundo, cor, titulo, valor):
+    st.markdown(
+        f'<div class="kpi"><div class="kpi-ico" style="background:{fundo};color:{cor}">{icone}</div>'
+        f'<div><div class="kpi-t">{titulo}</div><div class="kpi-v">{valor}</div></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def esc(x):
+    return html.escape(str(x))
+
+
+def horas_desde(texto):
+    """Horas desde a saída e a data da saída (None se a data estiver inválida)."""
+    try:
+        saida = datetime.strptime(texto, FORMATO)
+    except (ValueError, TypeError):
+        return 0.0, None
+    return max((agora() - saida).total_seconds() / 3600, 0.0), saida
+
+
+# ---------------------------------------------------------------- Formulários
+def form_retirada(p, df, ferramentas, colaboradores, na_janela=False):
+    """Formulário de retirada. 'p' é um prefixo para as chaves dos campos."""
+    k = st.session_state.saida_key
+    em_uso = df[df["Status"] == "Em uso"]
+    bloqueados = {chave_equip(r.Equipamento, r.Lacre) for r in em_uso.itertuples()}
+
+    if ferramentas:
+        disponiveis = [f for f in ferramentas if chave_equip(f[0], f[1]) not in bloqueados]
+        if not disponiveis:
+            st.warning("Todos os equipamentos estão em uso.")
+        escolha = st.selectbox(
+            "Equipamento *", disponiveis, index=None,
+            placeholder="Busque pelo nome ou lacre",
+            format_func=lambda f: f"{f[0]} | Lacre {f[1]}",
+            key=f"{p}_eq_{k}",
+        )
+        equip, lacre = escolha if escolha else ("", "")
+    else:
+        equip = st.text_input("Equipamento *", key=f"{p}_eqt_{k}").strip().upper()
+        lacre = st.text_input("Lacre", key=f"{p}_lacre_{k}").strip()
+
+    if colaboradores:
+        colab = st.selectbox(
+            "Colaborador *", colaboradores, index=None,
+            placeholder="Selecione o colaborador", key=f"{p}_colab_{k}",
+        ) or ""
+    else:
+        colab = st.text_input("Colaborador *", key=f"{p}_colabt_{k}").strip().upper()
+
+    if na_janela:
+        st.text_input("Data e hora da retirada", value=agora().strftime("%d/%m/%Y, %H:%M"),
+                      disabled=True, key=f"{p}_dt_{k}")
+
+    st.markdown("**Assinatura do colaborador \\***")
+    canvas = campo_assinatura(f"{p}_cv_{k}")
+    st.markdown('<div class="ass-legenda">Assinatura digital</div>', unsafe_allow_html=True)
+
+    col_ok, col_cancel = st.columns([1.3, 1]) if na_janela else (st.container(), None)
+    with col_ok:
+        confirmar = st.button("Confirmar retirada" if na_janela else "Confirmar",
+                              type="primary", use_container_width=not na_janela, key=f"{p}_ok_{k}")
+    if na_janela and col_cancel is not None:
+        with col_cancel:
+            if st.button("Cancelar", key=f"{p}_cancel_{k}", use_container_width=True):
+                st.rerun()
+    if na_janela:
+        st.caption("Os campos com * são obrigatórios")
+
+    if confirmar:
+        if not (equip and colab):
+            st.warning("Preencha equipamento e colaborador.")
+            return
+        assinatura = assinatura_para_base64(canvas)
+        if assinatura is None:
+            aviso_sem_assinatura(canvas)
+            return
+        # Relê a planilha na hora de salvar (evita 2 pessoas pegarem o mesmo item)
+        atual = carregar_dados()
+        ocupado = atual[
+            (atual["Status"] == "Em uso")
+            & (atual["Equipamento"] == equip) & (atual["Lacre"] == lacre)
+        ]
+        if not ocupado.empty:
+            st.error(f"'{equip}' (lacre {lacre}) já está em uso por {ocupado.iloc[-1]['Colaborador']}.")
+            return
+        aba_registros().append_row(
+            [uuid.uuid4().hex[:8], equip, str(lacre), colab,
+             agora().strftime(FORMATO), assinatura, "", "", "Em uso", 0.0],
+            value_input_option="RAW",
+        )
+        st.session_state.saida_key += 1
+        st.session_state.msg = f"Saída de '{equip}' registrada para {colab}!"
+        st.rerun()
+
+
+def form_devolucao(p, df, id_fixo=None, na_janela=False):
+    """Formulário de devolução. Se 'id_fixo' vier preenchido, devolve aquele registro."""
+    k = st.session_state.entrada_key
+    em_uso = df[df["Status"] == "Em uso"]
+    if em_uso.empty:
+        st.info("Nenhum equipamento em uso no momento.")
+        return
+
+    if id_fixo:
+        linha = em_uso[em_uso["ID"] == id_fixo]
+        if linha.empty:
+            st.info("Este equipamento já foi devolvido.")
+            return
+        r = linha.iloc[0]
+        st.markdown(
+            f"**{esc(r['Equipamento'])}** · Lacre {esc(r['Lacre'])}  \n"
+            f"<span class='mut'>{esc(r['Colaborador'])} · saiu em {esc(r['Data_Hora_Saida'])}</span>",
+            unsafe_allow_html=True,
+        )
+        id_reg = id_fixo
+    else:
+        opcoes = {
+            f"{r.Equipamento} | Lacre {r.Lacre} | {r.Colaborador} | saiu {r.Data_Hora_Saida}": r.ID
+            for r in em_uso.itertuples()
+        }
+        rotulo = st.selectbox("Equipamento em uso *", list(opcoes.keys()), index=None,
+                              placeholder="Busque pelo nome, lacre ou colaborador",
+                              key=f"{p}_eq_{k}")
+        id_reg = opcoes.get(rotulo) if rotulo else None
+
+    st.markdown("**Assinatura do colaborador \\***")
+    canvas = campo_assinatura(f"{p}_cv_{k}")
+    st.markdown('<div class="ass-legenda">Assinatura digital</div>', unsafe_allow_html=True)
+
+    col_ok, col_cancel = st.columns([1.3, 1]) if na_janela else (st.container(), None)
+    with col_ok:
+        confirmar = st.button("Confirmar devolução" if na_janela else "Confirmar",
+                              type="primary", use_container_width=not na_janela, key=f"{p}_ok_{k}")
+    if na_janela and col_cancel is not None:
+        with col_cancel:
+            if st.button("Cancelar", key=f"{p}_cancel_{k}", use_container_width=True):
+                st.rerun()
+
+    if confirmar:
+        if not id_reg:
+            st.warning("Selecione o equipamento.")
+            return
+        assinatura = assinatura_para_base64(canvas)
+        if assinatura is None:
+            aviso_sem_assinatura(canvas)
+            return
+        ws = aba_registros()
+        atual = carregar_dados()
+        linha_df = atual[(atual["ID"] == id_reg) & (atual["Status"] == "Em uso")]
+        if linha_df.empty:
+            st.error("Este equipamento já foi devolvido.")
+            return
+        saida = datetime.strptime(linha_df.iloc[0]["Data_Hora_Saida"], FORMATO)
+        entrada = agora()
+        horas = round((entrada - saida).total_seconds() / 3600, 2)
+        numero_linha = ws.col_values(1).index(id_reg) + 1
+        ws.batch_update(
+            [{"range": f"G{numero_linha}:J{numero_linha}",
+              "values": [[entrada.strftime(FORMATO), assinatura, "Devolvido", horas]]}],
+            value_input_option="RAW",
+        )
+        st.session_state.entrada_key += 1
+        st.session_state.msg = f"Entrada registrada! Tempo de uso: {formata_tempo(horas)}."
+        st.rerun()
+
+
+@st.dialog("Registrar movimentação")
+def janela_movimentacao(df, ferramentas, colaboradores):
+    st.caption("Registre a retirada ou devolução de um equipamento")
+    aba_ret, aba_dev = st.tabs(["Retirada", "Devolução"])
+    with aba_ret:
+        form_retirada("jr", df, ferramentas, colaboradores, na_janela=True)
+    with aba_dev:
+        form_devolucao("jd", df, na_janela=True)
+
+
+@st.dialog("Registrar devolução")
+def janela_devolucao(id_reg, df):
+    form_devolucao("jf", df, id_fixo=id_reg, na_janela=True)
+
+
+# ---------------------------------------------------------------- Páginas
+menu = st.sidebar.selectbox("Navegação", ["Painel", "Relatórios"])
 
 if "msg" in st.session_state:
     st.success(st.session_state.pop("msg"))
 
-if menu == "Registrar Movimentação":
+if menu == "Painel":
     df = carregar_dados()
+    ferramentas = ler_lista("Ferramentas", ["Equipamento", "Lacre"], 2)
+    colaboradores = [c[0] for c in ler_lista("Colaboradores", ["Colaborador"], 1)]
     em_uso = df[df["Status"] == "Em uso"]
     bloqueados = {chave_equip(r.Equipamento, r.Lacre) for r in em_uso.itertuples()}
 
-    col1, col2 = st.columns(2)
+    # ----- topo
+    topo_titulo, topo_botao = st.columns([3.5, 1.3], vertical_alignment="center")
+    with topo_titulo:
+        st.markdown('<p class="tit">Controle de Equipamentos</p>'
+                    '<p class="sub">Gerencie retiradas e devoluções em um só lugar</p>',
+                    unsafe_allow_html=True)
+    with topo_botao:
+        if st.button("＋  Registrar movimentação", type="primary", use_container_width=True):
+            janela_movimentacao(df, ferramentas, colaboradores)
 
-    # ---------------- SAÍDA
-    with col1:
-        st.subheader("Registrar Saída (Retirada)")
+    st.write("")
 
-        ferramentas = ler_lista("Ferramentas", ["Equipamento", "Lacre"], 2)
-        disponiveis = [f for f in ferramentas if chave_equip(f[0], f[1]) not in bloqueados]
-
-        if ferramentas:
-            if disponiveis:
-                escolha = st.selectbox(
-                    "Equipamento disponível",
-                    disponiveis,
-                    format_func=lambda f: f"{f[0]} | Lacre {f[1]}",
-                    key=f"equip_saida_{st.session_state.saida_key}",
-                )
-                equip_saida, lacre_saida = escolha
-            else:
-                st.warning("Todos os equipamentos estão em uso.")
-                equip_saida = lacre_saida = ""
-        else:
-            equip_saida = st.text_input("Equipamento", key=f"eq_txt_{st.session_state.saida_key}").strip().upper()
-            lacre_saida = st.text_input("Lacre", key=f"lacre_txt_{st.session_state.saida_key}").strip()
-
-        colaboradores = [c[0] for c in ler_lista("Colaboradores", ["Colaborador"], 1)]
-        if colaboradores:
-            colab_saida = st.selectbox("Colaborador", colaboradores, key=f"colab_saida_{st.session_state.saida_key}")
-        else:
-            colab_saida = st.text_input("Colaborador", key=f"colab_txt_{st.session_state.saida_key}").strip().upper()
-
-        st.write("Assinatura de saída:")
-        canvas_saida = campo_assinatura(f"canvas_saida_{st.session_state.saida_key}")
-
-        if st.button("Registrar Saída", type="primary"):
-            if not (equip_saida and colab_saida):
-                st.warning("Preencha equipamento e colaborador.")
-            else:
-                assinatura = assinatura_para_base64(canvas_saida)
-                if assinatura is None:
-                    aviso_sem_assinatura(canvas_saida)
-                else:
-                    # Relê a planilha na hora de salvar (evita 2 pessoas pegarem o mesmo item)
-                    atual = carregar_dados()
-                    ocupado = atual[
-                        (atual["Status"] == "Em uso")
-                        & (atual["Equipamento"] == equip_saida)
-                        & (atual["Lacre"] == lacre_saida)
-                    ]
-                    if not ocupado.empty:
-                        st.error(f"'{equip_saida}' (lacre {lacre_saida}) já está em uso por {ocupado.iloc[-1]['Colaborador']}.")
-                    else:
-                        aba_registros().append_row(
-                            [
-                                uuid.uuid4().hex[:8], equip_saida, str(lacre_saida), colab_saida,
-                                agora().strftime(FORMATO), assinatura,
-                                "", "", "Em uso", 0.0,
-                            ],
-                            value_input_option="RAW",
-                        )
-                        st.session_state.saida_key += 1
-                        st.session_state.msg = f"Saída de '{equip_saida}' registrada para {colab_saida}!"
-                        st.rerun()
-
-    # ---------------- ENTRADA
-    with col2:
-        st.subheader("Registrar Entrada (Devolução)")
-        if em_uso.empty:
-            st.info("Nenhum equipamento em uso no momento.")
-        else:
-            opcoes = {
-                f"{r.Equipamento} | Lacre {r.Lacre} | {r.Colaborador} | saiu {r.Data_Hora_Saida}": r.ID
-                for r in em_uso.itertuples()
-            }
-            rotulo = st.selectbox("Equipamento em uso", list(opcoes.keys()), key=f"equip_entrada_{st.session_state.entrada_key}")
-
-            st.write("Assinatura de entrada:")
-            canvas_entrada = campo_assinatura(f"canvas_entrada_{st.session_state.entrada_key}")
-
-            if st.button("Registrar Entrada", type="primary"):
-                assinatura = assinatura_para_base64(canvas_entrada)
-                if assinatura is None:
-                    aviso_sem_assinatura(canvas_entrada)
-                else:
-                    id_reg = opcoes[rotulo]
-                    ws = aba_registros()
-                    atual = carregar_dados()
-                    linha_df = atual[(atual["ID"] == id_reg) & (atual["Status"] == "Em uso")]
-                    if linha_df.empty:
-                        st.error("Este equipamento já foi devolvido.")
-                    else:
-                        saida = datetime.strptime(linha_df.iloc[0]["Data_Hora_Saida"], FORMATO)
-                        entrada = agora()
-                        horas = round((entrada - saida).total_seconds() / 3600, 2)
-                        numero_linha = ws.col_values(1).index(id_reg) + 1
-                        ws.batch_update(
-                            [{
-                                "range": f"G{numero_linha}:J{numero_linha}",
-                                "values": [[entrada.strftime(FORMATO), assinatura, "Devolvido", horas]],
-                            }],
-                            value_input_option="RAW",
-                        )
-                        st.session_state.entrada_key += 1
-                        st.session_state.msg = f"Entrada registrada! Tempo de uso: {formata_tempo(horas)}."
-                        st.rerun()
-
-    st.divider()
-    st.subheader("Equipamentos em uso agora")
-    if em_uso.empty:
-        st.caption("Nenhum.")
+    # ----- indicadores
+    pendentes = 0
+    for r in em_uso.itertuples():
+        _, saida_dt = horas_desde(r.Data_Hora_Saida)
+        if saida_dt is not None and saida_dt.date() < agora().date():
+            pendentes += 1
+    if ferramentas:
+        disponiveis_qtd = len([f for f in ferramentas if chave_equip(f[0], f[1]) not in bloqueados])
     else:
-        st.dataframe(
-            em_uso[["Equipamento", "Lacre", "Colaborador", "Data_Hora_Saida"]],
-            use_container_width=True, hide_index=True,
-        )
+        disponiveis_qtd = "—"
+
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        card_indicador(ICONE_OK, "#dcfce7", "#15803d", "Disponíveis", disponiveis_qtd)
+    with k2:
+        card_indicador(ICONE_USO, "#dbeafe", "#1d4ed8", "Em uso", len(em_uso))
+    with k3:
+        card_indicador(ICONE_ALERTA, "#fef3c7", "#b45309", "Pendentes de devolução", pendentes)
+
+    st.write("")
+
+    # ----- retirada + devoluções
+    col_esq, col_dir = st.columns([1, 1.35])
+
+    with col_esq:
+        with st.container(key="card_retirada"):
+            st.markdown("### Registrar retirada")
+            form_retirada("pr", df, ferramentas, colaboradores)
+
+    with col_dir:
+        with st.container(key="card_devolucoes"):
+            st.markdown("### Devoluções")
+            if em_uso.empty:
+                st.caption("Nenhum equipamento em uso no momento.")
+            else:
+                cab = st.columns([2.3, 1.7, 1.2, 1.3, 1.2])
+                for c, nome in zip(cab, ["Equipamento", "Colaborador", "Duração", "Status", ""]):
+                    c.markdown(f'<div class="th">{nome or "&nbsp;"}</div>', unsafe_allow_html=True)
+                for r in em_uso.itertuples():
+                    horas, saida_dt = horas_desde(r.Data_Hora_Saida)
+                    atrasado = saida_dt is not None and saida_dt.date() < agora().date()
+                    c = st.columns([2.3, 1.7, 1.2, 1.3, 1.2], vertical_alignment="center")
+                    c[0].markdown(f"**{esc(r.Equipamento)}**  \n<span class='mut'>Lacre {esc(r.Lacre)}</span>",
+                                  unsafe_allow_html=True)
+                    c[1].markdown(esc(r.Colaborador))
+                    c[2].markdown(formata_tempo(horas))
+                    c[3].markdown(
+                        '<span class="badge b-warn">Pendente</span>' if atrasado
+                        else '<span class="badge b-ok">Em uso</span>',
+                        unsafe_allow_html=True,
+                    )
+                    if c[4].button("Devolver", key=f"dev_{r.Index}_{r.ID}", use_container_width=True):
+                        janela_devolucao(r.ID, df)
+                    st.markdown('<hr class="sep">', unsafe_allow_html=True)
 
 else:
-    st.header("Painel de Relatórios")
+    st.markdown('<p class="tit">Relatórios</p>'
+                '<p class="sub">Consulte as movimentações por dia e baixe o PDF</p>',
+                unsafe_allow_html=True)
+    st.write("")
     df = carregar_dados()
 
     if df.empty:
@@ -468,11 +666,12 @@ else:
         df["_saida"] = pd.to_datetime(df["Data_Hora_Saida"], errors="coerce")
         df["Tempo_Uso_Horas"] = df["Tempo_Uso_Horas"].apply(para_float)
 
-        periodo = st.date_input(
-            "Filtrar por dia (escolha o mesmo dia duas vezes para um único dia)",
-            value=(date.today(), date.today()),
-            format="DD/MM/YYYY",
-        )
+        with st.container(key="card_filtro"):
+            periodo = st.date_input(
+                "Filtrar por dia (escolha o mesmo dia duas vezes para um único dia)",
+                value=(date.today(), date.today()),
+                format="DD/MM/YYYY",
+            )
         if isinstance(periodo, (tuple, list)):
             inicio = periodo[0]
             fim = periodo[1] if len(periodo) > 1 else periodo[0]
@@ -482,32 +681,36 @@ else:
         filtrado = df[(df["_saida"].dt.date >= inicio) & (df["_saida"].dt.date <= fim)].copy()
         titulo = inicio.strftime("%d/%m/%Y") if inicio == fim else f"{inicio:%d/%m/%Y} a {fim:%d/%m/%Y}"
 
+        st.write("")
         c1, c2, c3 = st.columns(3)
         c1.metric("Movimentações", len(filtrado))
         c2.metric("Em uso", int((filtrado["Status"] == "Em uso").sum()))
         c3.metric("Horas de uso", formata_tempo(filtrado["Tempo_Uso_Horas"].sum()))
+        st.write("")
 
         if filtrado.empty:
             st.info(f"Nenhuma movimentação em {titulo}.")
         else:
-            tab1, tab2 = st.tabs(["Movimentações", "Resumo por equipamento"])
-            with tab1:
-                st.dataframe(
-                    filtrado[["Equipamento", "Lacre", "Colaborador", "Data_Hora_Saida",
-                              "Data_Hora_Entrada", "Status", "Tempo_Uso_Horas"]],
-                    use_container_width=True, hide_index=True,
-                )
-            with tab2:
-                resumo = (
-                    filtrado.groupby(["Equipamento", "Lacre"])["Tempo_Uso_Horas"]
-                    .sum().reset_index()
-                )
-                st.dataframe(resumo, use_container_width=True, hide_index=True)
+            with st.container(key="card_tabela"):
+                tab1, tab2 = st.tabs(["Movimentações", "Resumo por equipamento"])
+                with tab1:
+                    st.dataframe(
+                        filtrado[["Equipamento", "Lacre", "Colaborador", "Data_Hora_Saida",
+                                  "Data_Hora_Entrada", "Status", "Tempo_Uso_Horas"]],
+                        use_container_width=True, hide_index=True,
+                    )
+                with tab2:
+                    resumo = (
+                        filtrado.groupby(["Equipamento", "Lacre"])["Tempo_Uso_Horas"]
+                        .sum().reset_index()
+                    )
+                    st.dataframe(resumo, use_container_width=True, hide_index=True)
 
-            pdf_bytes = gerar_pdf(filtrado.sort_values("_saida"), titulo)
-            st.download_button(
-                "Baixar relatório em PDF",
-                data=pdf_bytes,
-                file_name=f"relatorio_equipamentos_{inicio:%Y-%m-%d}_{fim:%Y-%m-%d}.pdf",
-                mime="application/pdf",
-            )
+                pdf_bytes = gerar_pdf(filtrado.sort_values("_saida"), titulo)
+                st.download_button(
+                    "Baixar relatório em PDF",
+                    data=pdf_bytes,
+                    file_name=f"relatorio_equipamentos_{inicio:%Y-%m-%d}_{fim:%Y-%m-%d}.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                )
