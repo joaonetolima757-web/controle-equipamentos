@@ -38,7 +38,7 @@ PLANILHA_URL = st.secrets.get("planilha_url", "https://docs.google.com/spreadshe
 LIMITE_CELULA = 45000
 
 # ---- Regras de autorização (senha do responsável) ----
-# A senha fica em Secrets:  senha_responsavel = "amx123"
+# A senha fica em Secrets:  senha_responsavel = "sua-senha-aqui"
 PRAZO_DEVOLUCAO_DIAS = 7        # passou disso sem devolver -> nova retirada precisa de autorização
 VALIDADE_LIBERACAO_MIN = 15     # quanto tempo a liberação da assinatura de devolução vale
 ABA_AUTORIZACOES = "Autorizacoes"
