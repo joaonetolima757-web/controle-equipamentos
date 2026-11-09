@@ -331,56 +331,52 @@ def gerar_pdf(df, titulo_periodo):
 CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-html, body, .stApp, .stApp * { font-family: 'Inter', sans-serif; }
-.stApp { background: #eef1f5; }
+.stApp, .stApp p, .stApp label, .stApp h1, .stApp h2, .stApp h3, .stApp li, .stApp a,
+.stApp button, .stApp input, .stApp textarea { font-family: 'Inter', sans-serif; }
 header[data-testid="stHeader"] { background: transparent; }
-section[data-testid="stSidebar"] { background: #ffffff; }
 .block-container { max-width: 1200px; padding-top: 2.2rem; padding-bottom: 3rem; }
 
-/* cartões (containers com key começando por "card") */
+/* cartões: fundo e borda translucidos, funcionam no tema claro e no escuro */
 [class*="st-key-card"] {
-    background: #ffffff; border: 1px solid #e1e6ee; border-radius: 14px;
-    padding: 1.2rem 1.3rem; box-shadow: 0 1px 3px rgba(16,24,40,.06);
+    background: rgba(128,128,128,.07); border: 1px solid rgba(128,128,128,.28);
+    border-radius: 14px; padding: 1.2rem 1.3rem;
 }
-[class*="st-key-card"] h3 { margin: 0 0 .6rem 0; font-size: 1.25rem; font-weight: 600; color: #0f172a; }
+[class*="st-key-card"] h3 { margin: 0 0 .6rem 0; font-size: 1.25rem; font-weight: 600; }
 
 /* título */
-.tit { font-size: 2rem; font-weight: 700; color: #0f172a; margin: 0; line-height: 1.2; }
-.sub { color: #475569; margin: .2rem 0 0 0; }
+.tit { font-size: 2rem; font-weight: 700; margin: 0; line-height: 1.2; }
+.sub { opacity: .75; margin: .2rem 0 0 0; }
 
 /* indicadores */
-.kpi { display: flex; align-items: center; gap: .9rem; background: #fff; border: 1px solid #e1e6ee;
-       border-radius: 14px; padding: 1.1rem 1.3rem; box-shadow: 0 1px 3px rgba(16,24,40,.06); }
+.kpi { display: flex; align-items: center; gap: .9rem; background: rgba(128,128,128,.07);
+       border: 1px solid rgba(128,128,128,.28); border-radius: 14px; padding: 1.1rem 1.3rem; }
 .kpi-ico { width: 52px; height: 52px; border-radius: 12px; display: flex; align-items: center; justify-content: center; }
-.kpi-t { color: #334155; font-size: .95rem; }
-.kpi-v { color: #0f172a; font-size: 1.9rem; font-weight: 700; line-height: 1.1; }
+.kpi-t { opacity: .8; font-size: .95rem; }
+.kpi-v { font-size: 1.9rem; font-weight: 700; line-height: 1.1; }
 
 /* tabela de devoluções */
-.th { font-size: .85rem; font-weight: 600; color: #475569; background: #f1f4f8; padding: .55rem .7rem; border-radius: 8px; }
-.mut { color: #64748b; font-size: .85rem; }
-.sep { border: 0; border-top: 1px solid #edf0f5; margin: .35rem 0; }
-.badge { display: inline-block; padding: .22rem .7rem; border-radius: 999px; font-size: .8rem; font-weight: 600; }
-.b-ok { background: #dcfce7; color: #15803d; }
-.b-warn { background: #fef3c7; color: #b45309; }
+.th { font-size: .8rem; font-weight: 600; background: rgba(128,128,128,.16); padding: .5rem .6rem;
+      border-radius: 8px; white-space: nowrap; }
+.mut { opacity: .65; font-size: .85rem; }
+.sep { border: 0; border-top: 1px solid rgba(128,128,128,.22); margin: .35rem 0; }
+.badge { display: inline-block; padding: .22rem .7rem; border-radius: 999px; font-size: .8rem;
+         font-weight: 600; white-space: nowrap; }
+.b-ok { background: rgba(34,197,94,.2); color: #22c55e; }
+.b-warn { background: rgba(245,158,11,.2); color: #f59e0b; }
 
-/* campos */
-div[data-baseweb="select"] > div, div[data-baseweb="input"] > div, div[data-baseweb="base-input"] {
-    background: #ffffff !important; border: 1px solid #cdd5e0 !important; border-radius: 9px !important;
-}
-label p { font-weight: 600 !important; color: #0f172a; }
-
-/* botões */
-.stButton > button { border-radius: 10px; font-weight: 600; padding: .55rem 1rem; }
-.stButton > button[kind="secondary"] { background: #fff; border: 1px solid #cdd5e0; color: #0f172a; }
+/* campos e botões */
+div[data-baseweb="select"] > div, div[data-baseweb="input"] > div { border-radius: 9px !important; }
+.stButton > button { border-radius: 10px; font-weight: 600; padding: .5rem .8rem; white-space: nowrap; }
 .stButton > button[kind="primary"] { background: #e11d2e; border: 1px solid #e11d2e; color: #fff; }
-.stButton > button[kind="primary"]:hover { background: #bf1625; border-color: #bf1625; }
+.stButton > button[kind="primary"]:hover { background: #bf1625; border-color: #bf1625; color: #fff; }
 
-/* quadro de assinatura */
-iframe[title*="st_canvas"] { border: 1.5px dashed #c3ccd8; border-radius: 12px; background: #f4f6f9; }
-.ass-legenda { text-align: center; color: #64748b; font-size: .85rem; margin-top: -.2rem; }
+/* quadro de assinatura (fundo claro para o traço preto aparecer nos dois temas) */
+iframe[title*="st_canvas"] { border: 1.5px dashed rgba(128,128,128,.7); border-radius: 12px; background: #f4f6f9; }
+.ass-legenda { text-align: center; opacity: .65; font-size: .85rem; margin-top: -.2rem; }
 
 /* indicadores do relatório */
-[data-testid="stMetric"] { background: #fff; border: 1px solid #e1e6ee; border-radius: 14px; padding: 1rem 1.2rem; }
+[data-testid="stMetric"] { background: rgba(128,128,128,.07); border: 1px solid rgba(128,128,128,.28);
+                           border-radius: 14px; padding: 1rem 1.2rem; }
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -611,16 +607,16 @@ if menu == "Painel":
 
     k1, k2, k3 = st.columns(3)
     with k1:
-        card_indicador(ICONE_OK, "#dcfce7", "#15803d", "Disponíveis", disponiveis_qtd)
+        card_indicador(ICONE_OK, "rgba(34,197,94,.2)", "#22c55e", "Disponíveis", disponiveis_qtd)
     with k2:
-        card_indicador(ICONE_USO, "#dbeafe", "#1d4ed8", "Em uso", len(em_uso))
+        card_indicador(ICONE_USO, "rgba(59,130,246,.2)", "#3b82f6", "Em uso", len(em_uso))
     with k3:
-        card_indicador(ICONE_ALERTA, "#fef3c7", "#b45309", "Pendentes de devolução", pendentes)
+        card_indicador(ICONE_ALERTA, "rgba(245,158,11,.2)", "#f59e0b", "Pendentes de devolução", pendentes)
 
     st.write("")
 
     # ----- retirada + devoluções
-    col_esq, col_dir = st.columns([1, 1.35])
+    col_esq, col_dir = st.columns([1, 1.5])
 
     with col_esq:
         with st.container(key="card_retirada"):
@@ -633,13 +629,13 @@ if menu == "Painel":
             if em_uso.empty:
                 st.caption("Nenhum equipamento em uso no momento.")
             else:
-                cab = st.columns([2.3, 1.7, 1.2, 1.3, 1.2])
+                cab = st.columns([2.0, 1.5, 1.45, 1.35, 1.7])
                 for c, nome in zip(cab, ["Equipamento", "Colaborador", "Duração", "Status", ""]):
                     c.markdown(f'<div class="th">{nome or "&nbsp;"}</div>', unsafe_allow_html=True)
                 for r in em_uso.itertuples():
                     horas, saida_dt = horas_desde(r.Data_Hora_Saida)
                     atrasado = saida_dt is not None and saida_dt.date() < agora().date()
-                    c = st.columns([2.3, 1.7, 1.2, 1.3, 1.2], vertical_alignment="center")
+                    c = st.columns([2.0, 1.5, 1.45, 1.35, 1.7], vertical_alignment="center")
                     c[0].markdown(f"**{esc(r.Equipamento)}**  \n<span class='mut'>Lacre {esc(r.Lacre)}</span>",
                                   unsafe_allow_html=True)
                     c[1].markdown(esc(r.Colaborador))
