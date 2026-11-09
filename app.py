@@ -23,23 +23,25 @@ st.set_page_config(page_title="Controle de Equipamentos", layout="wide")
 FUSO = ZoneInfo("America/Sao_Paulo")
 FORMATO = "%Y-%m-%d %H:%M:%S"
 
-# Ordem EXATA das colunas da aba "Registros" (A até J)
+# Ordem EXATA das colunas da aba "Registros" (A até K)
+# A coluna K (Transferencias) é criada sozinha na primeira transferência.
 COLUNAS = [
     "ID", "Equipamento", "Lacre", "Colaborador",
     "Data_Hora_Saida", "Assinatura_Saida",
     "Data_Hora_Entrada", "Assinatura_Entrada",
     "Status", "Tempo_Uso_Horas",
+    "Transferencias",
 ]
 
 # Cole o link da planilha aqui OU coloque em Secrets: planilha_url = "https://..."
-PLANILHA_URL = st.secrets.get("planilha_url", "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=0#gid=0")
+PLANILHA_URL = st.secrets.get("planilha_url", "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=1708575817#gid=1708575817")
 
 # Limite de uma célula do Google Sheets = 50.000 caracteres
 LIMITE_CELULA = 45000
 
 # ---- Regras de autorização (senha do responsável) ----
 # A senha fica em Secrets:  senha_responsavel = "sua-senha-aqui"
-PRAZO_DEVOLUCAO_DIAS = 7        # passou disso sem devolver -> nova retirada precisa de autorização
+PRAZO_DEVOLUCAO_HORAS = 12      # passou disso sem devolver -> nova retirada precisa de autorização
 VALIDADE_LIBERACAO_MIN = 15     # quanto tempo a liberação da assinatura de devolução vale
 ABA_AUTORIZACOES = "Autorizacoes"
 COLUNAS_AUT = [
@@ -48,9 +50,10 @@ COLUNAS_AUT = [
 ]
 TIPO_RETIRADA = "Retirada com devolução atrasada"
 TIPO_LIB_DEVOLUCAO = "Liberação de assinatura (devolução)"
+TIPO_TRANSFERENCIA = "Transferência de equipamento"
 
 # Chaves para limpar o quadro de assinatura depois de salvar
-for chave in ("saida_key", "entrada_key", "aut_key", "lib_key"):
+for chave in ("saida_key", "entrada_key", "aut_key", "lib_key", "transf_key"):
     if chave not in st.session_state:
         st.session_state[chave] = 0
 
@@ -381,7 +384,10 @@ def gerar_pdf(df, titulo_periodo):
 
     # ----- um bloco por movimentação
     for _, r in df.iterrows():
-        if pdf.get_y() + ALT > 278:
+        transfs = ler_transferencias(r["Transferencias"])
+        extra = 5 * len(transfs) + (1 if transfs else 0)  # espaço p/ as linhas de transferência
+        alt_bloco = ALT + extra
+        if pdf.get_y() + alt_bloco > 278:
             pdf.add_page()
             pdf.set_y(12)
         y0 = pdf.get_y()
@@ -390,7 +396,7 @@ def gerar_pdf(df, titulo_periodo):
         # moldura e faixa do topo
         pdf.set_draw_color(200, 205, 214)
         pdf.set_line_width(0.3)
-        pdf.rect(ESQ, y0, LARG, ALT)
+        pdf.rect(ESQ, y0, LARG, alt_bloco)
         pdf.set_fill_color(240, 242, 246)
         pdf.rect(ESQ, y0, LARG, 10, style="DF")
 
@@ -402,7 +408,7 @@ def gerar_pdf(df, titulo_periodo):
 
         # dados em quatro colunas (rótulo pequeno em cima, valor embaixo)
         campos = [
-            ("COLABORADOR", r["Colaborador"]),
+            ("COLABORADOR ATUAL" if transfs else "COLABORADOR", r["Colaborador"]),
             ("SAÍDA", data_br(r["Data_Hora_Saida"])),
             ("ENTRADA", data_br(r["Data_Hora_Entrada"]) if devolvido else "Ainda não devolvido"),
             ("TEMPO DE USO", formata_tempo(r["Tempo_Uso_Horas"]) if devolvido else "-"),
@@ -416,19 +422,29 @@ def gerar_pdf(df, titulo_periodo):
         pdf.set_draw_color(225, 228, 234)
         pdf.line(ESQ + 3, y0 + 25.5, ESQ + LARG - 3, y0 + 25.5)
 
+        # transferências (uma linha para cada)
+        for i, (de, para, dt) in enumerate(transfs):
+            quando = data_br(dt.strftime(FORMATO)) if dt else "?"
+            texto_em(pdf, ESQ + 3, y0 + 27 + i * 5, LARG - 6,
+                     f"TRANSFERIDO: {de} -> {para} em {quando}",
+                     fonte=("Helvetica", "B", 8.5), cor=(180, 110, 0))
+
         # assinaturas lado a lado
         larg_ass = 89
         x1 = ESQ + 3
         x2 = x1 + larg_ass + 4
-        texto_em(pdf, x1, y0 + 27, larg_ass, "ASSINATURA DE SAÍDA", fonte=("Helvetica", "", 7), cor=CINZA_RUIM)
-        texto_em(pdf, x2, y0 + 27, larg_ass, "ASSINATURA DE ENTRADA", fonte=("Helvetica", "", 7), cor=CINZA_RUIM)
-        desenha_assinatura(pdf, r["Assinatura_Saida"], x1, y0 + 31.5, larg_ass, 26, "sem assinatura")
+        ya = y0 + extra  # desce as assinaturas quando há transferências
+        rot_saida = "ASSINATURA DE SAÍDA" + (f" ({transfs[0][0]})" if transfs else "")
+        rot_entrada = "ASSINATURA DE ENTRADA" + (f" ({r['Colaborador']})" if transfs else "")
+        texto_em(pdf, x1, ya + 27, larg_ass, rot_saida.upper(), fonte=("Helvetica", "", 7), cor=CINZA_RUIM)
+        texto_em(pdf, x2, ya + 27, larg_ass, rot_entrada.upper(), fonte=("Helvetica", "", 7), cor=CINZA_RUIM)
+        desenha_assinatura(pdf, r["Assinatura_Saida"], x1, ya + 31.5, larg_ass, 26, "sem assinatura")
         desenha_assinatura(
-            pdf, r["Assinatura_Entrada"] if devolvido else "", x2, y0 + 31.5, larg_ass, 26,
+            pdf, r["Assinatura_Entrada"] if devolvido else "", x2, ya + 31.5, larg_ass, 26,
             "aguardando devolução" if not devolvido else "sem assinatura",
         )
 
-        pdf.set_y(y0 + ALT + 5)
+        pdf.set_y(y0 + alt_bloco + 5)
 
     saida = pdf.output(dest="S")
     if isinstance(saida, str):
@@ -568,18 +584,58 @@ def liberacao_valida(id_reg):
     return False
 
 
-def prazo_devolucao(saida_dt):
-    return saida_dt + timedelta(days=PRAZO_DEVOLUCAO_DIAS)
+def prazo_devolucao(inicio_dt):
+    return inicio_dt + timedelta(hours=PRAZO_DEVOLUCAO_HORAS)
+
+
+# ---------------------------------------------------------------- Transferências
+# Formato guardado na coluna K:  "DE > PARA @ 2026-11-09 13:30:00 | DE2 > PARA2 @ ..."
+SEP_TRANSF = " | "
+
+
+def ler_transferencias(texto):
+    """Texto da coluna K -> lista de (de, para, datetime ou None)."""
+    lista = []
+    for parte in str(texto or "").split(SEP_TRANSF):
+        if " > " not in parte or " @ " not in parte:
+            continue
+        nomes, quando = parte.rsplit(" @ ", 1)
+        de, para = nomes.split(" > ", 1)
+        try:
+            dt = datetime.strptime(quando.strip(), FORMATO)
+        except ValueError:
+            dt = None
+        lista.append((de.strip(), para.strip(), dt))
+    return lista
+
+
+def texto_transferencias(texto):
+    """Versão legível para a tabela do relatório."""
+    return "; ".join(
+        f"{de} -> {para} ({data_br(dt.strftime(FORMATO)) if dt else '?'})"
+        for de, para, dt in ler_transferencias(texto)
+    )
+
+
+def inicio_da_posse(saida_texto, transf_texto):
+    """Quando o colaborador ATUAL ficou com o equipamento: na saída, ou na última
+    transferência. É daqui que conta o prazo de devolução."""
+    _, saida_dt = horas_desde(saida_texto)
+    for _, _, dt in reversed(ler_transferencias(transf_texto)):
+        if dt is not None:
+            return dt
+        break
+    return saida_dt
 
 
 def atrasados_do_colaborador(df, colab):
-    """Equipamentos que o colaborador pegou e não devolveu dentro do prazo (7 dias)."""
+    """Equipamentos que o colaborador está com e não devolveu dentro do prazo (12 horas)."""
     lista = []
     em_uso = df[(df["Status"] == "Em uso") & (df["Colaborador"] == colab)]
     for r in em_uso.itertuples():
-        _, saida_dt = horas_desde(r.Data_Hora_Saida)
-        if saida_dt is not None and agora() > prazo_devolucao(saida_dt):
-            lista.append((r.Equipamento, r.Lacre, prazo_devolucao(saida_dt)))
+        inicio_dt = inicio_da_posse(r.Data_Hora_Saida, r.Transferencias)
+        if inicio_dt is not None and agora() > prazo_devolucao(inicio_dt):
+            lista.append((r.Equipamento, r.Lacre, prazo_devolucao(inicio_dt)))
     return lista
 
 
@@ -588,7 +644,7 @@ def html_aviso_pendencia(colab, atrasados):
         '<div class="aviso-item">'
         f"<b>Equipamento:</b> {esc(eq)} - Lacre {esc(lacre)}<br>"
         f"<b>Colaborador:</b> {esc(colab)}<br>"
-        f"<b>Prazo de devolução:</b> Vencido (em {prazo:%d/%m/%Y})"
+        f"<b>Prazo de devolução:</b> Vencido (em {prazo:%d/%m/%Y às %H:%M})"
         "</div>"
         for eq, lacre, prazo in atrasados
     )
@@ -649,7 +705,7 @@ def bloco_autorizacao(p, pend):
     id_novo = registrar_retirada(pend["equip"], pend["lacre"], pend["colab"], pend["assinatura"])
     if not id_novo:
         return
-    resumo = "; ".join(f"{eq} (lacre {lc}, venceu em {pz:%d/%m/%Y})" for eq, lc, pz in pend["atrasados"])
+    resumo = "; ".join(f"{eq} (lacre {lc}, venceu em {pz:%d/%m/%Y %H:%M})" for eq, lc, pz in pend["atrasados"])
     registrar_autorizacao(TIPO_RETIRADA, id_novo, pend["colab"], pend["equip"], pend["lacre"],
                           justificativa.strip(), resumo)
     st.session_state.pop(f"{p}_pend", None)
@@ -726,7 +782,7 @@ def form_retirada(p, df, ferramentas, colaboradores, na_janela=False):
                 st.session_state.msg = f"Saída de '{equip}' registrada para {colab}!"
                 st.rerun()
             return
-        # Tem devolução vencida (mais de 7 dias): guarda o pedido e pede a senha do responsável
+        # Tem devolução vencida (mais de 12 horas): guarda o pedido e pede a senha do responsável
         st.session_state[pend_key] = {
             "equip": equip, "lacre": lacre, "colab": colab,
             "assinatura": assinatura, "atrasados": atrasados,
@@ -829,19 +885,129 @@ def form_devolucao(p, df, id_fixo=None, na_janela=False):
         st.rerun()
 
 
+def garantir_coluna_transferencias(ws):
+    """Cria o cabeçalho da coluna K (Transferencias) na aba Registros, se faltar."""
+    if ws.col_count < len(COLUNAS):
+        ws.add_cols(len(COLUNAS) - ws.col_count)
+    cab = ws.row_values(1)
+    if len(cab) < len(COLUNAS) or cab[len(COLUNAS) - 1].strip() != COLUNAS[-1]:
+        ws.update_cell(1, len(COLUNAS), COLUNAS[-1])
+
+
+def form_transferencia(p, df, colaboradores, id_fixo=None, na_janela=False):
+    """Passa um equipamento em uso para outro colaborador. O novo colaborador
+    só assina na devolução; o prazo de 12 h passa a contar a partir da transferência."""
+    k = st.session_state.transf_key
+    em_uso = df[df["Status"] == "Em uso"]
+    if em_uso.empty:
+        st.info("Nenhum equipamento em uso no momento.")
+        return
+
+    if id_fixo:
+        linha = em_uso[em_uso["ID"] == id_fixo]
+        if linha.empty:
+            st.info("Este equipamento já foi devolvido.")
+            return
+        r = linha.iloc[0]
+        st.markdown(
+            f"**{esc(r['Equipamento'])}** · Lacre {esc(r['Lacre'])}  \n"
+            f"<span class='mut'>Com {esc(r['Colaborador'])} · saiu em {esc(r['Data_Hora_Saida'])}</span>",
+            unsafe_allow_html=True,
+        )
+        id_reg = id_fixo
+    else:
+        opcoes = {
+            f"{r.Equipamento} | Lacre {r.Lacre} | {r.Colaborador} | saiu {r.Data_Hora_Saida}": r.ID
+            for r in em_uso.itertuples()
+        }
+        rotulo = st.selectbox("Equipamento em uso *", list(opcoes.keys()), index=None,
+                              placeholder="Busque pelo nome, lacre ou colaborador",
+                              key=f"{p}_eq_{k}")
+        id_reg = opcoes.get(rotulo) if rotulo else None
+        if not id_reg:
+            st.caption("Selecione o equipamento para continuar.")
+            return
+
+    atual_colab = em_uso[em_uso["ID"] == id_reg].iloc[0]["Colaborador"]
+
+    if colaboradores:
+        novo = st.selectbox(
+            "Transferir para *", [c for c in colaboradores if c != atual_colab],
+            index=None, placeholder="Selecione o novo colaborador", key=f"{p}_novo_{k}",
+        ) or ""
+    else:
+        novo = st.text_input("Transferir para *", key=f"{p}_novot_{k}").strip().upper()
+    motivo = st.text_area("Motivo da transferência (opcional)", height=80, key=f"{p}_mot_{k}")
+    st.caption(f"O novo colaborador só assina na devolução. O prazo de {PRAZO_DEVOLUCAO_HORAS} horas "
+               "passa a contar a partir de agora.")
+
+    col_ok, col_cancel = st.columns([1.3, 1]) if na_janela else (st.container(), None)
+    with col_ok:
+        confirmar = st.button("Confirmar transferência", type="primary",
+                              use_container_width=True, key=f"{p}_ok_{k}")
+    if na_janela and col_cancel is not None:
+        with col_cancel:
+            if st.button("Cancelar", key=f"{p}_cancel_{k}", use_container_width=True):
+                st.rerun()
+
+    if not confirmar:
+        return
+    if not novo:
+        st.warning("Selecione o colaborador que vai receber o equipamento.")
+        return
+    if novo == atual_colab:
+        st.warning("O equipamento já está com este colaborador.")
+        return
+
+    ws = aba_registros()
+    atual = carregar_dados()  # relê na hora de salvar
+    linha_df = atual[(atual["ID"] == id_reg) & (atual["Status"] == "Em uso")]
+    if linha_df.empty:
+        st.error("Este equipamento já foi devolvido.")
+        return
+    reg = linha_df.iloc[0]
+    de = reg["Colaborador"]
+    agora_txt = agora().strftime(FORMATO)
+    historico = reg["Transferencias"].strip()
+    historico = (historico + SEP_TRANSF if historico else "") + f"{de} > {novo} @ {agora_txt}"
+
+    garantir_coluna_transferencias(ws)
+    numero_linha = ws.col_values(1).index(id_reg) + 1
+    ws.batch_update(
+        [
+            {"range": f"D{numero_linha}", "values": [[novo]]},
+            {"range": f"K{numero_linha}", "values": [[historico]]},
+        ],
+        value_input_option="RAW",
+    )
+    registrar_autorizacao(TIPO_TRANSFERENCIA, id_reg, novo, reg["Equipamento"], reg["Lacre"],
+                          motivo.strip(), f"De {de} para {novo}")
+    st.session_state.transf_key += 1
+    st.session_state.msg = (f"'{reg['Equipamento']}' transferido de {de} para {novo}. "
+                            f"{novo} assina na devolução.")
+    st.rerun()
+
+
 @st.dialog("Registrar movimentação")
 def janela_movimentacao(df, ferramentas, colaboradores):
-    st.caption("Registre a retirada ou devolução de um equipamento")
-    aba_ret, aba_dev = st.tabs(["Retirada", "Devolução"])
+    st.caption("Registre a retirada, devolução ou transferência de um equipamento")
+    aba_ret, aba_dev, aba_transf = st.tabs(["Retirada", "Devolução", "Transferência"])
     with aba_ret:
         form_retirada("jr", df, ferramentas, colaboradores, na_janela=True)
     with aba_dev:
         form_devolucao("jd", df, na_janela=True)
+    with aba_transf:
+        form_transferencia("jt", df, colaboradores, na_janela=True)
 
 
 @st.dialog("Registrar devolução")
 def janela_devolucao(id_reg, df):
     form_devolucao("jf", df, id_fixo=id_reg, na_janela=True)
+
+
+@st.dialog("Transferir equipamento")
+def janela_transferencia(id_reg, df, colaboradores):
+    form_transferencia("jx", df, colaboradores, id_fixo=id_reg, na_janela=True)
 
 
 # ---------------------------------------------------------------- Páginas
@@ -904,23 +1070,31 @@ if menu == "Painel":
             if em_uso.empty:
                 st.caption("Nenhum equipamento em uso no momento.")
             else:
-                cab = st.columns([2.0, 1.5, 1.45, 1.35, 1.7])
-                for c, nome in zip(cab, ["Equipamento", "Colaborador", "Duração", "Status", ""]):
+                larguras = [1.7, 1.4, 1.1, 1.1, 1.3, 1.3]
+                cab = st.columns(larguras)
+                for c, nome in zip(cab, ["Equipamento", "Colaborador", "Duração", "Status", "", ""]):
                     c.markdown(f'<div class="th">{nome or "&nbsp;"}</div>', unsafe_allow_html=True)
                 for r in em_uso.itertuples():
                     horas, saida_dt = horas_desde(r.Data_Hora_Saida)
                     atrasado = saida_dt is not None and saida_dt.date() < agora().date()
-                    c = st.columns([2.0, 1.5, 1.45, 1.35, 1.7], vertical_alignment="center")
+                    c = st.columns(larguras, vertical_alignment="center")
                     c[0].markdown(f"**{esc(r.Equipamento)}**  \n<span class='mut'>Lacre {esc(r.Lacre)}</span>",
                                   unsafe_allow_html=True)
-                    c[1].markdown(esc(r.Colaborador))
+                    transf = ler_transferencias(r.Transferencias)
+                    c[1].markdown(
+                        esc(r.Colaborador)
+                        + (f"  \n<span class='mut'>de {esc(transf[-1][0])}</span>" if transf else ""),
+                        unsafe_allow_html=True,
+                    )
                     c[2].markdown(formata_tempo(horas))
                     c[3].markdown(
                         '<span class="badge b-warn">Pendente</span>' if atrasado
                         else '<span class="badge b-ok">Em uso</span>',
                         unsafe_allow_html=True,
                     )
-                    if c[4].button("Devolver", key=f"dev_{r.Index}_{r.ID}", use_container_width=True):
+                    if c[4].button("Transferir", key=f"transf_{r.Index}_{r.ID}", use_container_width=True):
+                        janela_transferencia(r.ID, df, colaboradores)
+                    if c[5].button("Devolver", key=f"dev_{r.Index}_{r.ID}", use_container_width=True):
                         janela_devolucao(r.ID, df)
                     st.markdown('<hr class="sep">', unsafe_allow_html=True)
 
@@ -987,10 +1161,12 @@ else:
         titulo = inicio.strftime("%d/%m/%Y") if inicio == fim else f"{inicio:%d/%m/%Y} a {fim:%d/%m/%Y}"
 
         st.write("")
-        c1, c2, c3 = st.columns(3)
+        filtrado["Transferência"] = filtrado["Transferencias"].apply(texto_transferencias)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Movimentações", len(filtrado))
         c2.metric("Em uso", int((filtrado["Status"] == "Em uso").sum()))
         c3.metric("Horas de uso", formata_tempo(filtrado["Tempo_Uso_Horas"].sum()))
+        c4.metric("Com transferência", int((filtrado["Transferência"] != "").sum()))
         st.write("")
 
         if filtrado.empty:
@@ -1001,7 +1177,7 @@ else:
                 with tab1:
                     st.dataframe(
                         filtrado[["Equipamento", "Lacre", "Colaborador", "Data_Hora_Saida",
-                                  "Data_Hora_Entrada", "Status", "Tempo_Uso_Horas"]],
+                                  "Data_Hora_Entrada", "Status", "Tempo_Uso_Horas", "Transferência"]],
                         use_container_width=True, hide_index=True,
                     )
                 with tab2:
