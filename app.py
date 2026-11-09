@@ -1,4 +1,5 @@
 import base64
+import hmac
 import html
 import io
 import json
@@ -6,7 +7,7 @@ import os
 import tempfile
 import traceback
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 import gspread
@@ -36,8 +37,20 @@ PLANILHA_URL = st.secrets.get("planilha_url", "https://docs.google.com/spreadshe
 # Limite de uma célula do Google Sheets = 50.000 caracteres
 LIMITE_CELULA = 45000
 
+# ---- Regras de autorização (senha do responsável) ----
+# A senha fica em Secrets:  senha_responsavel = "amx123"
+PRAZO_DEVOLUCAO_DIAS = 7        # passou disso sem devolver -> nova retirada precisa de autorização
+VALIDADE_LIBERACAO_MIN = 15     # quanto tempo a liberação da assinatura de devolução vale
+ABA_AUTORIZACOES = "Autorizacoes"
+COLUNAS_AUT = [
+    "Data_Hora", "Tipo", "ID_Registro", "Colaborador",
+    "Equipamento", "Lacre", "Justificativa", "Pendencias",
+]
+TIPO_RETIRADA = "Retirada com devolução atrasada"
+TIPO_LIB_DEVOLUCAO = "Liberação de assinatura (devolução)"
+
 # Chaves para limpar o quadro de assinatura depois de salvar
-for chave in ("saida_key", "entrada_key"):
+for chave in ("saida_key", "entrada_key", "aut_key", "lib_key"):
     if chave not in st.session_state:
         st.session_state[chave] = 0
 
@@ -466,6 +479,13 @@ div[data-baseweb="select"] > div, div[data-baseweb="input"] > div { border-radiu
 .stButton > button[kind="primary"] { background: #e11d2e; border: 1px solid #e11d2e; color: #fff; }
 .stButton > button[kind="primary"]:hover { background: #bf1625; border-color: #bf1625; color: #fff; }
 
+/* aviso de devolução pendente */
+.aviso { border: 2px solid #d9480f; border-radius: 12px; padding: 1rem 1.1rem;
+         background: rgba(217,72,15,.08); margin-bottom: .8rem; }
+.aviso-tit { font-weight: 700; font-size: 1.05rem; color: #d9480f; margin-bottom: .3rem; }
+.aviso-item { background: rgba(128,128,128,.1); border: 1px solid rgba(128,128,128,.28);
+              border-radius: 10px; padding: .6rem .8rem; margin-top: .5rem; font-size: .92rem; line-height: 1.55; }
+
 /* quadro de assinatura (fundo claro para o traço preto aparecer nos dois temas) */
 iframe[title*="st_canvas"] { border: 1.5px dashed rgba(128,128,128,.7); border-radius: 12px; background: #f4f6f9; }
 .ass-legenda { text-align: center; opacity: .65; font-size: .85rem; margin-top: -.2rem; }
@@ -501,6 +521,142 @@ def horas_desde(texto):
     except (ValueError, TypeError):
         return 0.0, None
     return max((agora() - saida).total_seconds() / 3600, 0.0), saida
+
+
+# ---------------------------------------------------------------- Autorizações (senha do responsável)
+def senha_correta(digitada):
+    """Confere a senha do responsável (Secrets: senha_responsavel). Mostra o erro na tela."""
+    correta = str(st.secrets.get("senha_responsavel", ""))
+    if not correta:
+        st.error("Senha do responsável não configurada. Defina 'senha_responsavel' em Secrets.")
+        return False
+    if not hmac.compare_digest(str(digitada).encode("utf-8"), correta.encode("utf-8")):
+        st.error("Senha incorreta.")
+        return False
+    return True
+
+
+def aba_autorizacoes():
+    """Aba de auditoria. Se ainda não existir, é criada sozinha com o cabeçalho."""
+    planilha = conectar_planilha()
+    try:
+        return planilha.worksheet(ABA_AUTORIZACOES)
+    except gspread.WorksheetNotFound:
+        ws = planilha.add_worksheet(title=ABA_AUTORIZACOES, rows=1000, cols=len(COLUNAS_AUT))
+        ws.append_row(COLUNAS_AUT, value_input_option="RAW")
+        return ws
+
+
+def registrar_autorizacao(tipo, id_reg, colab, equip, lacre, justificativa="", pendencias=""):
+    aba_autorizacoes().append_row(
+        [agora().strftime(FORMATO), tipo, id_reg, colab, equip, str(lacre), justificativa, pendencias],
+        value_input_option="RAW",
+    )
+
+
+def liberacao_valida(id_reg):
+    """True se o almoxarifado liberou a assinatura deste registro há menos de VALIDADE_LIBERACAO_MIN."""
+    valores = aba_autorizacoes().get_all_values()
+    for r in reversed(valores[1:]):
+        r = (r + [""] * len(COLUNAS_AUT))[: len(COLUNAS_AUT)]
+        if r[1] == TIPO_LIB_DEVOLUCAO and r[2] == id_reg:
+            try:
+                quando = datetime.strptime(r[0], FORMATO)
+            except ValueError:
+                continue
+            return agora() - quando <= timedelta(minutes=VALIDADE_LIBERACAO_MIN)
+    return False
+
+
+def prazo_devolucao(saida_dt):
+    return saida_dt + timedelta(days=PRAZO_DEVOLUCAO_DIAS)
+
+
+def atrasados_do_colaborador(df, colab):
+    """Equipamentos que o colaborador pegou e não devolveu dentro do prazo (7 dias)."""
+    lista = []
+    em_uso = df[(df["Status"] == "Em uso") & (df["Colaborador"] == colab)]
+    for r in em_uso.itertuples():
+        _, saida_dt = horas_desde(r.Data_Hora_Saida)
+        if saida_dt is not None and agora() > prazo_devolucao(saida_dt):
+            lista.append((r.Equipamento, r.Lacre, prazo_devolucao(saida_dt)))
+    return lista
+
+
+def html_aviso_pendencia(colab, atrasados):
+    itens = "".join(
+        '<div class="aviso-item">'
+        f"<b>Equipamento:</b> {esc(eq)} - Lacre {esc(lacre)}<br>"
+        f"<b>Colaborador:</b> {esc(colab)}<br>"
+        f"<b>Prazo de devolução:</b> Vencido (em {prazo:%d/%m/%Y})"
+        "</div>"
+        for eq, lacre, prazo in atrasados
+    )
+    return (
+        '<div class="aviso"><div class="aviso-tit">⚠️ ATENÇÃO: DEVOLUÇÃO PENDENTE</div>'
+        f"<div>O material abaixo ainda não foi devolvido.</div>{itens}</div>"
+    )
+
+
+def registrar_retirada(equip, lacre, colab, assinatura, atual=None):
+    """Grava a saída. Devolve o ID novo, ou None se o item já estiver em uso."""
+    # Relê a planilha na hora de salvar (evita 2 pessoas pegarem o mesmo item)
+    if atual is None:
+        atual = carregar_dados()
+    ocupado = atual[
+        (atual["Status"] == "Em uso")
+        & (atual["Equipamento"] == equip) & (atual["Lacre"] == lacre)
+    ]
+    if not ocupado.empty:
+        st.error(f"'{equip}' (lacre {lacre}) já está em uso por {ocupado.iloc[-1]['Colaborador']}.")
+        return None
+    id_novo = uuid.uuid4().hex[:8]
+    aba_registros().append_row(
+        [id_novo, equip, str(lacre), colab,
+         agora().strftime(FORMATO), assinatura, "", "", "Em uso", 0.0],
+        value_input_option="RAW",
+    )
+    return id_novo
+
+
+def bloco_autorizacao(p, pend):
+    """Aviso + senha do responsável + justificativa para liberar uma nova retirada."""
+    ka = st.session_state.aut_key
+    st.markdown(html_aviso_pendencia(pend["colab"], pend["atrasados"]), unsafe_allow_html=True)
+    st.caption("Nova retirada bloqueada. Para liberar, o responsável informa a senha "
+               "e o motivo de o equipamento não ter sido devolvido.")
+    senha = st.text_input("Senha do responsável *", type="password", key=f"{p}_senha_{ka}")
+    justificativa = st.text_area("Motivo de não ter devolvido *", height=90, key=f"{p}_just_{ka}")
+
+    col_ok, col_cancel = st.columns([1.3, 1])
+    with col_ok:
+        liberar = st.button("Liberar retirada", type="primary", use_container_width=True,
+                            key=f"{p}_lib_{ka}")
+    with col_cancel:
+        if st.button("Cancelar", use_container_width=True, key=f"{p}_libcancel_{ka}"):
+            st.session_state.pop(f"{p}_pend", None)
+            st.session_state.aut_key += 1
+            st.rerun()
+
+    if not liberar:
+        return
+    if not senha_correta(senha):
+        return
+    if not justificativa.strip():
+        st.warning("Escreva o motivo de o equipamento não ter sido devolvido.")
+        return
+
+    id_novo = registrar_retirada(pend["equip"], pend["lacre"], pend["colab"], pend["assinatura"])
+    if not id_novo:
+        return
+    resumo = "; ".join(f"{eq} (lacre {lc}, venceu em {pz:%d/%m/%Y})" for eq, lc, pz in pend["atrasados"])
+    registrar_autorizacao(TIPO_RETIRADA, id_novo, pend["colab"], pend["equip"], pend["lacre"],
+                          justificativa.strip(), resumo)
+    st.session_state.pop(f"{p}_pend", None)
+    st.session_state.saida_key += 1
+    st.session_state.aut_key += 1
+    st.session_state.msg = f"Saída de '{pend['equip']}' registrada para {pend['colab']} com autorização do responsável!"
+    st.rerun()
 
 
 # ---------------------------------------------------------------- Formulários
@@ -552,7 +708,9 @@ def form_retirada(p, df, ferramentas, colaboradores, na_janela=False):
     if na_janela:
         st.caption("Os campos com * são obrigatórios")
 
+    pend_key = f"{p}_pend"
     if confirmar:
+        st.session_state.pop(pend_key, None)
         if not (equip and colab):
             st.warning("Preencha equipamento e colaborador.")
             return
@@ -560,23 +718,26 @@ def form_retirada(p, df, ferramentas, colaboradores, na_janela=False):
         if assinatura is None:
             aviso_sem_assinatura(canvas)
             return
-        # Relê a planilha na hora de salvar (evita 2 pessoas pegarem o mesmo item)
         atual = carregar_dados()
-        ocupado = atual[
-            (atual["Status"] == "Em uso")
-            & (atual["Equipamento"] == equip) & (atual["Lacre"] == lacre)
-        ]
-        if not ocupado.empty:
-            st.error(f"'{equip}' (lacre {lacre}) já está em uso por {ocupado.iloc[-1]['Colaborador']}.")
+        atrasados = atrasados_do_colaborador(atual, colab)
+        if not atrasados:
+            if registrar_retirada(equip, lacre, colab, assinatura, atual=atual):
+                st.session_state.saida_key += 1
+                st.session_state.msg = f"Saída de '{equip}' registrada para {colab}!"
+                st.rerun()
             return
-        aba_registros().append_row(
-            [uuid.uuid4().hex[:8], equip, str(lacre), colab,
-             agora().strftime(FORMATO), assinatura, "", "", "Em uso", 0.0],
-            value_input_option="RAW",
-        )
-        st.session_state.saida_key += 1
-        st.session_state.msg = f"Saída de '{equip}' registrada para {colab}!"
-        st.rerun()
+        # Tem devolução vencida (mais de 7 dias): guarda o pedido e pede a senha do responsável
+        st.session_state[pend_key] = {
+            "equip": equip, "lacre": lacre, "colab": colab,
+            "assinatura": assinatura, "atrasados": atrasados,
+        }
+
+    pend = st.session_state.get(pend_key)
+    if pend and (pend["equip"], pend["lacre"], pend["colab"]) != (equip, lacre, colab):
+        st.session_state.pop(pend_key, None)  # mudou equipamento/colaborador: o pedido antigo cai
+        pend = None
+    if pend:
+        bloco_autorizacao(p, pend)
 
 
 def form_devolucao(p, df, id_fixo=None, na_janela=False):
@@ -609,6 +770,21 @@ def form_devolucao(p, df, id_fixo=None, na_janela=False):
                               key=f"{p}_eq_{k}")
         id_reg = opcoes.get(rotulo) if rotulo else None
 
+    if not id_reg:
+        st.caption("Selecione o equipamento para continuar.")
+        return
+
+    # A assinatura só aparece depois que o almoxarifado liberar com a senha
+    if not liberacao_valida(id_reg):
+        st.markdown(
+            '<div class="aviso"><div class="aviso-tit">🔒 AGUARDANDO LIBERAÇÃO DO ALMOXARIFADO</div>'
+            "<div>Entregue o equipamento no almoxarifado. Depois que o responsável liberar, "
+            "toque em <b>Verificar liberação</b> para assinar.</div></div>",
+            unsafe_allow_html=True,
+        )
+        st.button("Verificar liberação", use_container_width=True, key=f"{p}_ver_{k}")
+        return
+
     st.markdown("**Assinatura do colaborador \\***")
     canvas = campo_assinatura(f"{p}_cv_{k}")
     st.markdown('<div class="ass-legenda">Assinatura digital</div>', unsafe_allow_html=True)
@@ -629,6 +805,9 @@ def form_devolucao(p, df, id_fixo=None, na_janela=False):
         assinatura = assinatura_para_base64(canvas)
         if assinatura is None:
             aviso_sem_assinatura(canvas)
+            return
+        if not liberacao_valida(id_reg):
+            st.error("A liberação expirou. Peça ao almoxarifado para liberar novamente.")
             return
         ws = aba_registros()
         atual = carregar_dados()
@@ -666,7 +845,7 @@ def janela_devolucao(id_reg, df):
 
 
 # ---------------------------------------------------------------- Páginas
-menu = st.sidebar.selectbox("Navegação", ["Painel", "Relatórios"])
+menu = st.sidebar.selectbox("Navegação", ["Painel", "Relatórios", "Almoxarifado"])
 
 if "msg" in st.session_state:
     st.success(st.session_state.pop("msg"))
@@ -744,6 +923,40 @@ if menu == "Painel":
                     if c[4].button("Devolver", key=f"dev_{r.Index}_{r.ID}", use_container_width=True):
                         janela_devolucao(r.ID, df)
                     st.markdown('<hr class="sep">', unsafe_allow_html=True)
+
+elif menu == "Almoxarifado":
+    st.markdown('<p class="tit">Almoxarifado</p>'
+                '<p class="sub">Libere a assinatura de devolução para o colaborador</p>',
+                unsafe_allow_html=True)
+    st.write("")
+    df = carregar_dados()
+    em_uso = df[df["Status"] == "Em uso"]
+
+    if em_uso.empty:
+        st.info("Nenhum equipamento em uso no momento.")
+    else:
+        kl = st.session_state.lib_key
+        with st.container(key="card_liberacao"):
+            st.markdown("### Liberar assinatura de devolução")
+            opcoes = {
+                f"{r.Equipamento} | Lacre {r.Lacre} | {r.Colaborador} | saiu {r.Data_Hora_Saida}": r
+                for r in em_uso.itertuples()
+            }
+            rotulo = st.selectbox("Equipamento em uso *", list(opcoes.keys()), index=None,
+                                  placeholder="Busque pelo nome, lacre ou colaborador",
+                                  key=f"lib_eq_{kl}")
+            senha = st.text_input("Senha do responsável *", type="password", key=f"lib_senha_{kl}")
+            st.caption(f"A liberação vale por {VALIDADE_LIBERACAO_MIN} minutos.")
+            if st.button("Liberar assinatura", type="primary", key=f"lib_ok_{kl}"):
+                if not rotulo:
+                    st.warning("Selecione o equipamento.")
+                elif senha_correta(senha):
+                    r = opcoes[rotulo]
+                    registrar_autorizacao(TIPO_LIB_DEVOLUCAO, r.ID, r.Colaborador, r.Equipamento, r.Lacre)
+                    st.session_state.lib_key += 1
+                    st.session_state.msg = (f"Assinatura liberada para {r.Colaborador} "
+                                            f"({r.Equipamento}, lacre {r.Lacre}).")
+                    st.rerun()
 
 else:
     st.markdown('<p class="tit">Relatórios</p>'
