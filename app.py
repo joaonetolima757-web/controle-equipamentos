@@ -34,7 +34,7 @@ COLUNAS = [
 ]
 
 # Cole o link da planilha aqui OU coloque em Secrets: planilha_url = "https://..."
-PLANILHA_URL = st.secrets.get("planilha_url", "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=1708575817#gid=1708575817")
+PLANILHA_URL = st.secrets.get("https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=483892025#gid=483892025")
 
 # Limite de uma célula do Google Sheets = 50.000 caracteres
 LIMITE_CELULA = 45000
@@ -350,9 +350,34 @@ def desenha_assinatura(pdf, b64, x, y, larg, alt, texto_vazio):
             os.remove(caminho)
 
 
-def gerar_pdf(df, titulo_periodo):
+def quebra_linhas(pdf, texto, largura, fonte, max_linhas=5):
+    """Quebra o texto em linhas que cabem na largura (mm). Corta com '...' se passar do limite."""
+    pdf.set_font(*fonte)
+    texto = limpa(" ".join(str(texto).split()))
+    linhas, atual = [], ""
+    for palavra in texto.split(" "):
+        teste = (atual + " " + palavra).strip()
+        if pdf.get_string_width(teste) <= largura:
+            atual = teste
+        else:
+            if atual:
+                linhas.append(atual)
+            atual = palavra
+    if atual:
+        linhas.append(atual)
+    if len(linhas) > max_linhas:
+        linhas = linhas[:max_linhas]
+        linhas[-1] = cabe(pdf, linhas[-1] + "...", largura)
+    return linhas
+
+
+def gerar_pdf(df, titulo_periodo, motivos=None):
     ESQ, LARG, ALT = 10, 190, 62  # margem, largura útil e altura de cada bloco (mm)
     CINZA_RUIM = (110, 115, 125)
+    motivos = motivos or {}
+    F_TIT = ("Helvetica", "B", 8.5)
+    F_TXT = ("Helvetica", "", 8.5)
+    ALT_LINHA = 4.6
 
     pdf = RelatorioPDF(format="A4")
     pdf.alias_nb_pages()
@@ -385,7 +410,26 @@ def gerar_pdf(df, titulo_periodo):
     # ----- um bloco por movimentação
     for _, r in df.iterrows():
         transfs = ler_transferencias(r["Transferencias"])
-        extra = 5 * len(transfs) + (1 if transfs else 0)  # espaço p/ as linhas de transferência
+
+        # notas do bloco: (texto, fonte, cor, recuo). Retirada autorizada + transferências, com motivo.
+        notas = []
+        aut = motivos.get("retirada", {}).get(r["ID"])
+        if aut:
+            notas.append(("RETIRADA AUTORIZADA PELO RESPONSÁVEL (devolução em atraso)", F_TIT, (190, 40, 40), 0))
+            for t in quebra_linhas(pdf, f"Motivo: {aut[0] or 'não informado'}", LARG - 10, F_TXT, 5):
+                notas.append((t, F_TXT, (60, 60, 60), 4))
+            if aut[1]:
+                for t in quebra_linhas(pdf, f"Pendências: {aut[1]}", LARG - 10, F_TXT, 3):
+                    notas.append((t, F_TXT, (60, 60, 60), 4))
+        motivos_transf = motivos.get("transf", {}).get(r["ID"], [])
+        for i, (de, para, dt) in enumerate(transfs):
+            quando = data_br(dt.strftime(FORMATO)) if dt else "?"
+            notas.append((f"TRANSFERIDO: {de} -> {para} em {quando}", F_TIT, (180, 110, 0), 0))
+            mot = motivos_transf[i] if i < len(motivos_transf) else ""
+            if mot:
+                for t in quebra_linhas(pdf, f"Motivo: {mot}", LARG - 10, F_TXT, 5):
+                    notas.append((t, F_TXT, (60, 60, 60), 4))
+        extra = ALT_LINHA * len(notas) + (1 if notas else 0)
         alt_bloco = ALT + extra
         if pdf.get_y() + alt_bloco > 278:
             pdf.add_page()
@@ -422,12 +466,10 @@ def gerar_pdf(df, titulo_periodo):
         pdf.set_draw_color(225, 228, 234)
         pdf.line(ESQ + 3, y0 + 25.5, ESQ + LARG - 3, y0 + 25.5)
 
-        # transferências (uma linha para cada)
-        for i, (de, para, dt) in enumerate(transfs):
-            quando = data_br(dt.strftime(FORMATO)) if dt else "?"
-            texto_em(pdf, ESQ + 3, y0 + 27 + i * 5, LARG - 6,
-                     f"TRANSFERIDO: {de} -> {para} em {quando}",
-                     fonte=("Helvetica", "B", 8.5), cor=(180, 110, 0))
+        # notas: retirada autorizada e transferências, com os motivos
+        for i, (txt, fonte, cor, recuo) in enumerate(notas):
+            texto_em(pdf, ESQ + 3 + recuo, y0 + 27 + i * ALT_LINHA, LARG - 6 - recuo, txt,
+                     fonte=fonte, cor=cor)
 
         # assinaturas lado a lado
         larg_ass = 89
@@ -570,6 +612,26 @@ def registrar_autorizacao(tipo, id_reg, colab, equip, lacre, justificativa="", p
     )
 
 
+def carregar_motivos():
+    """Lê a aba Autorizacoes e devolve os motivos por registro, para o relatório:
+    {"transf": {id: [motivo da 1ª transferência, 2ª, ...]},
+     "retirada": {id: (motivo, pendências)}}  (retirada liberada com devolução atrasada)"""
+    saida = {"transf": {}, "retirada": {}}
+    try:
+        valores = aba_autorizacoes().get_all_values()
+    except Exception:
+        traceback.print_exc()
+        return saida
+    for r in valores[1:]:
+        r = (r + [""] * len(COLUNAS_AUT))[: len(COLUNAS_AUT)]
+        tipo, id_reg, just, pend = r[1], r[2], r[6].strip(), r[7].strip()
+        if tipo == TIPO_TRANSFERENCIA:
+            saida["transf"].setdefault(id_reg, []).append(just)
+        elif tipo == TIPO_RETIRADA:
+            saida["retirada"][id_reg] = (just, pend)
+    return saida
+
+
 def liberacao_valida(id_reg):
     """True se o almoxarifado liberou a assinatura deste registro há menos de VALIDADE_LIBERACAO_MIN."""
     valores = aba_autorizacoes().get_all_values()
@@ -609,12 +671,16 @@ def ler_transferencias(texto):
     return lista
 
 
-def texto_transferencias(texto):
-    """Versão legível para a tabela do relatório."""
-    return "; ".join(
-        f"{de} -> {para} ({data_br(dt.strftime(FORMATO)) if dt else '?'})"
-        for de, para, dt in ler_transferencias(texto)
-    )
+def texto_transferencias(texto, motivos=None):
+    """Versão legível para a tabela do relatório (com o motivo, se houver)."""
+    motivos = motivos or []
+    partes = []
+    for i, (de, para, dt) in enumerate(ler_transferencias(texto)):
+        linha = f"{de} -> {para} ({data_br(dt.strftime(FORMATO)) if dt else '?'})"
+        if i < len(motivos) and motivos[i]:
+            linha += f" - Motivo: {motivos[i]}"
+        partes.append(linha)
+    return "; ".join(partes)
 
 
 def inicio_da_posse(saida_texto, transf_texto):
@@ -1161,7 +1227,15 @@ else:
         titulo = inicio.strftime("%d/%m/%Y") if inicio == fim else f"{inicio:%d/%m/%Y} a {fim:%d/%m/%Y}"
 
         st.write("")
-        filtrado["Transferência"] = filtrado["Transferencias"].apply(texto_transferencias)
+        motivos = carregar_motivos()
+        filtrado["Transferência"] = [
+            texto_transferencias(t, motivos["transf"].get(i, []))
+            for t, i in zip(filtrado["Transferencias"], filtrado["ID"])
+        ]
+        filtrado["Retirada em atraso (motivo)"] = [
+            motivos["retirada"][i][0] if i in motivos["retirada"] else ""
+            for i in filtrado["ID"]
+        ]
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Movimentações", len(filtrado))
         c2.metric("Em uso", int((filtrado["Status"] == "Em uso").sum()))
@@ -1177,7 +1251,8 @@ else:
                 with tab1:
                     st.dataframe(
                         filtrado[["Equipamento", "Lacre", "Colaborador", "Data_Hora_Saida",
-                                  "Data_Hora_Entrada", "Status", "Tempo_Uso_Horas", "Transferência"]],
+                                  "Data_Hora_Entrada", "Status", "Tempo_Uso_Horas", "Transferência",
+                                  "Retirada em atraso (motivo)"]],
                         use_container_width=True, hide_index=True,
                     )
                 with tab2:
@@ -1187,7 +1262,7 @@ else:
                     )
                     st.dataframe(resumo, use_container_width=True, hide_index=True)
 
-                pdf_bytes = gerar_pdf(filtrado.sort_values("_saida"), titulo)
+                pdf_bytes = gerar_pdf(filtrado.sort_values("_saida"), titulo, motivos)
                 st.download_button(
                     "Baixar relatório em PDF",
                     data=pdf_bytes,
