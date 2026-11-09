@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 from fpdf import FPDF
 from google.oauth2.service_account import Credentials
-from PIL import Image
+from PIL import Image, ImageDraw
 from streamlit_drawable_canvas import st_canvas
 
 st.set_page_config(page_title="Controle de Equipamentos", layout="wide")
@@ -93,19 +93,84 @@ def ler_lista(nome_aba, colunas_preferidas, qtd_colunas):
 
 
 # ---------------------------------------------------------------- Assinatura
-def assinatura_para_base64(image_data):
-    """Converte o desenho do canvas em PNG pequeno (base64). None se estiver vazio."""
-    if image_data is None:
+LARGURA_ASS, ALTURA_ASS = 300, 120
+ESCALA = 3  # desenha em resolução maior e reduz depois (traço mais suave)
+
+
+def _num(d, chave, padrao):
+    try:
+        v = d.get(chave, padrao)
+        return padrao if v is None else float(v)
+    except (TypeError, ValueError):
+        return padrao
+
+
+def _pontos_do_traco(obj):
+    """Converte um 'path' do canvas (fabric.js) em pontos na posição real do quadro."""
+    comandos = obj.get("path") or []
+    esc_x, esc_y = _num(obj, "scaleX", 1.0), _num(obj, "scaleY", 1.0)
+    off = obj.get("pathOffset") or {}
+    off_x, off_y = _num(off, "x", 0.0), _num(off, "y", 0.0)
+    # centro do objeto no quadro
+    cx = _num(obj, "left", 0.0) + _num(obj, "width", 0.0) * esc_x / 2
+    cy = _num(obj, "top", 0.0) + _num(obj, "height", 0.0) * esc_y / 2
+
+    def pos(x, y):
+        return (cx + (x - off_x) * esc_x, cy + (y - off_y) * esc_y)
+
+    pontos, atual = [], None
+    for c in comandos:
+        if not c:
+            continue
+        tipo, v = c[0], [float(n) for n in c[1:]]
+        if tipo == "M" and len(v) >= 2:
+            atual = pos(v[0], v[1])
+            pontos.append(atual)
+        elif tipo == "L" and len(v) >= 2:
+            atual = pos(v[0], v[1])
+            pontos.append(atual)
+        elif tipo == "Q" and len(v) >= 4 and atual is not None:
+            c1, fim = pos(v[0], v[1]), pos(v[2], v[3])
+            for i in range(1, 9):  # curva suave com 8 segmentos
+                t = i / 8
+                x = (1 - t) ** 2 * atual[0] + 2 * (1 - t) * t * c1[0] + t ** 2 * fim[0]
+                y = (1 - t) ** 2 * atual[1] + 2 * (1 - t) * t * c1[1] + t ** 2 * fim[1]
+                pontos.append((x, y))
+            atual = fim
+    return pontos
+
+
+def assinatura_para_base64(resultado):
+    """Redesenha a assinatura a partir do traço do canvas (json_data) e devolve
+    PNG pequeno em base64. Retorna None se o quadro estiver vazio."""
+    if resultado is None:
         return None
-    img = Image.fromarray(image_data.astype("uint8"), "RGBA")
-    fundo = Image.new("RGB", img.size, "white")
-    fundo.paste(img, mask=img.split()[3])  # transparência -> branco
-    cinza = fundo.convert("L")
-    if cinza.getextrema()[0] > 200:  # nada desenhado
+    dados = getattr(resultado, "json_data", None)
+    objetos = (dados or {}).get("objects") or []
+    tracos = [o for o in objetos if o.get("type") == "path"]
+    if not tracos:
         return None
-    cinza = cinza.resize((300, 120), Image.LANCZOS)
+
+    img = Image.new("L", (LARGURA_ASS * ESCALA, ALTURA_ASS * ESCALA), 255)
+    draw = ImageDraw.Draw(img)
+    desenhou = False
+    for obj in tracos:
+        pts = [(x * ESCALA, y * ESCALA) for x, y in _pontos_do_traco(obj)]
+        if not pts:
+            continue
+        largura = max(2, int(_num(obj, "strokeWidth", 2.0) * ESCALA))
+        if len(pts) == 1:
+            x, y = pts[0]
+            draw.ellipse([x - largura / 2, y - largura / 2, x + largura / 2, y + largura / 2], fill=0)
+        else:
+            draw.line(pts, fill=0, width=largura, joint="curve")
+        desenhou = True
+    if not desenhou:
+        return None
+
+    img = img.resize((LARGURA_ASS, ALTURA_ASS), Image.LANCZOS)
     buf = io.BytesIO()
-    cinza.save(buf, format="PNG", optimize=True)
+    img.save(buf, format="PNG", optimize=True)
     texto = base64.b64encode(buf.getvalue()).decode("ascii")
     return texto if len(texto) <= LIMITE_CELULA else None
 
@@ -259,7 +324,7 @@ if menu == "Registrar Movimentação":
             if not (equip_saida and colab_saida):
                 st.warning("Preencha equipamento e colaborador.")
             else:
-                assinatura = assinatura_para_base64(canvas_saida.image_data)
+                assinatura = assinatura_para_base64(canvas_saida)
                 if assinatura is None:
                     st.warning("Assine no quadro antes de registrar.")
                 else:
@@ -301,7 +366,7 @@ if menu == "Registrar Movimentação":
             canvas_entrada = campo_assinatura(f"canvas_entrada_{st.session_state.entrada_key}")
 
             if st.button("Registrar Entrada", type="primary"):
-                assinatura = assinatura_para_base64(canvas_entrada.image_data)
+                assinatura = assinatura_para_base64(canvas_entrada)
                 if assinatura is None:
                     st.warning("Assine no quadro antes de registrar.")
                 else:
