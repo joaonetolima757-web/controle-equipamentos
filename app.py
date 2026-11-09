@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import os
 import tempfile
 import uuid
@@ -97,82 +98,137 @@ LARGURA_ASS, ALTURA_ASS = 300, 120
 ESCALA = 3  # desenha em resolução maior e reduz depois (traço mais suave)
 
 
-def _num(d, chave, padrao):
-    try:
-        v = d.get(chave, padrao)
-        return padrao if v is None else float(v)
-    except (TypeError, ValueError):
-        return padrao
+def _json_do_canvas(resultado):
+    """Pega o json_data do canvas, aceitando dict ou texto JSON."""
+    dados = getattr(resultado, "json_data", None)
+    if isinstance(dados, (str, bytes)):
+        try:
+            dados = json.loads(dados)
+        except ValueError:
+            return {}
+    return dados if isinstance(dados, dict) else {}
 
 
-def _pontos_do_traco(obj):
-    """Converte um 'path' do canvas (fabric.js) em pontos na posição real do quadro."""
-    comandos = obj.get("path") or []
-    esc_x, esc_y = _num(obj, "scaleX", 1.0), _num(obj, "scaleY", 1.0)
-    off = obj.get("pathOffset") or {}
-    off_x, off_y = _num(off, "x", 0.0), _num(off, "y", 0.0)
-    # centro do objeto no quadro
-    cx = _num(obj, "left", 0.0) + _num(obj, "width", 0.0) * esc_x / 2
-    cy = _num(obj, "top", 0.0) + _num(obj, "height", 0.0) * esc_y / 2
-
-    def pos(x, y):
-        return (cx + (x - off_x) * esc_x, cy + (y - off_y) * esc_y)
-
+def _pontos_do_comando(comandos):
+    """Converte comandos de caminho (M, L, Q, C) em uma lista de pontos."""
     pontos, atual = [], None
     for c in comandos:
-        if not c:
+        if not isinstance(c, (list, tuple)) or not c:
             continue
-        tipo, v = c[0], [float(n) for n in c[1:]]
-        if tipo == "M" and len(v) >= 2:
-            atual = pos(v[0], v[1])
-            pontos.append(atual)
-        elif tipo == "L" and len(v) >= 2:
-            atual = pos(v[0], v[1])
+        tipo = str(c[0]).upper()
+        try:
+            v = [float(n) for n in c[1:]]
+        except (TypeError, ValueError):
+            continue
+        if tipo in ("M", "L") and len(v) >= 2:
+            atual = (v[0], v[1])
             pontos.append(atual)
         elif tipo == "Q" and len(v) >= 4 and atual is not None:
-            c1, fim = pos(v[0], v[1]), pos(v[2], v[3])
-            for i in range(1, 9):  # curva suave com 8 segmentos
+            c1, fim = (v[0], v[1]), (v[2], v[3])
+            for i in range(1, 9):
                 t = i / 8
-                x = (1 - t) ** 2 * atual[0] + 2 * (1 - t) * t * c1[0] + t ** 2 * fim[0]
-                y = (1 - t) ** 2 * atual[1] + 2 * (1 - t) * t * c1[1] + t ** 2 * fim[1]
-                pontos.append((x, y))
+                pontos.append((
+                    (1 - t) ** 2 * atual[0] + 2 * (1 - t) * t * c1[0] + t ** 2 * fim[0],
+                    (1 - t) ** 2 * atual[1] + 2 * (1 - t) * t * c1[1] + t ** 2 * fim[1],
+                ))
+            atual = fim
+        elif tipo == "C" and len(v) >= 6 and atual is not None:
+            c1, c2, fim = (v[0], v[1]), (v[2], v[3]), (v[4], v[5])
+            for i in range(1, 9):
+                t = i / 8
+                a = (1 - t) ** 3
+                b = 3 * (1 - t) ** 2 * t
+                c_ = 3 * (1 - t) * t ** 2
+                d = t ** 3
+                pontos.append((
+                    a * atual[0] + b * c1[0] + c_ * c2[0] + d * fim[0],
+                    a * atual[1] + b * c1[1] + c_ * c2[1] + d * fim[1],
+                ))
             atual = fim
     return pontos
 
 
-def assinatura_para_base64(resultado):
-    """Redesenha a assinatura a partir do traço do canvas (json_data) e devolve
-    PNG pequeno em base64. Retorna None se o quadro estiver vazio."""
-    if resultado is None:
-        return None
-    dados = getattr(resultado, "json_data", None)
-    objetos = (dados or {}).get("objects") or []
-    tracos = [o for o in objetos if o.get("type") == "path"]
-    if not tracos:
-        return None
+def _tracos_do_canvas(resultado):
+    """Lista de traços (cada um é uma lista de pontos). Funciona mesmo que a
+    biblioteca use 'path' ou 'Path' como tipo do objeto."""
+    objetos = _json_do_canvas(resultado).get("objects") or []
+    tracos = []
+    for o in objetos:
+        if isinstance(o, dict) and o.get("path"):
+            pts = _pontos_do_comando(o["path"])
+            if pts:
+                tracos.append(pts)
+    return tracos
 
-    img = Image.new("L", (LARGURA_ASS * ESCALA, ALTURA_ASS * ESCALA), 255)
-    draw = ImageDraw.Draw(img)
-    desenhou = False
-    for obj in tracos:
-        pts = [(x * ESCALA, y * ESCALA) for x, y in _pontos_do_traco(obj)]
-        if not pts:
-            continue
-        largura = max(2, int(_num(obj, "strokeWidth", 2.0) * ESCALA))
-        if len(pts) == 1:
-            x, y = pts[0]
-            draw.ellipse([x - largura / 2, y - largura / 2, x + largura / 2, y + largura / 2], fill=0)
-        else:
-            draw.line(pts, fill=0, width=largura, joint="curve")
-        desenhou = True
-    if not desenhou:
-        return None
 
-    img = img.resize((LARGURA_ASS, ALTURA_ASS), Image.LANCZOS)
+def _tracos_da_imagem(resultado):
+    """Plano B: se a biblioteca ainda entregar a imagem, usa os pixels escuros."""
+    try:
+        dados = resultado.image_data
+    except Exception:
+        return None
+    if dados is None:
+        return None
+    img = Image.fromarray(dados.astype("uint8"), "RGBA")
+    fundo = Image.new("RGB", img.size, "white")
+    fundo.paste(img, mask=img.split()[3])
+    cinza = fundo.convert("L")
+    if cinza.getextrema()[0] > 200:
+        return None
+    return cinza
+
+
+def _codifica(img):
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     texto = base64.b64encode(buf.getvalue()).decode("ascii")
     return texto if len(texto) <= LIMITE_CELULA else None
+
+
+def assinatura_para_base64(resultado):
+    """Redesenha a assinatura em PNG pequeno (base64). None se o quadro estiver vazio.
+    O traço é centralizado e ajustado ao tamanho do quadro."""
+    if resultado is None:
+        return None
+
+    tracos = _tracos_do_canvas(resultado)
+    if tracos:
+        xs = [p[0] for t in tracos for p in t]
+        ys = [p[1] for t in tracos for p in t]
+        minx, maxx, miny, maxy = min(xs), max(xs), min(ys), max(ys)
+        margem = 8
+        larg = max(maxx - minx, 1.0)
+        alt = max(maxy - miny, 1.0)
+        fator = min((LARGURA_ASS - 2 * margem) / larg, (ALTURA_ASS - 2 * margem) / alt, 3.0)
+        off_x = (LARGURA_ASS - larg * fator) / 2 - minx * fator
+        off_y = (ALTURA_ASS - alt * fator) / 2 - miny * fator
+
+        img = Image.new("L", (LARGURA_ASS * ESCALA, ALTURA_ASS * ESCALA), 255)
+        draw = ImageDraw.Draw(img)
+        espessura = 2 * ESCALA
+        for t in tracos:
+            pts = [((x * fator + off_x) * ESCALA, (y * fator + off_y) * ESCALA) for x, y in t]
+            if len(pts) == 1:
+                x, y = pts[0]
+                draw.ellipse([x - espessura, y - espessura, x + espessura, y + espessura], fill=0)
+            else:
+                draw.line(pts, fill=0, width=espessura, joint="curve")
+        img = img.resize((LARGURA_ASS, ALTURA_ASS), Image.LANCZOS)
+        return _codifica(img)
+
+    cinza = _tracos_da_imagem(resultado)
+    if cinza is not None:
+        return _codifica(cinza.resize((LARGURA_ASS, ALTURA_ASS), Image.LANCZOS))
+    return None
+
+
+def aviso_sem_assinatura(resultado):
+    """Avisa que falta assinatura e mostra o que o quadro devolveu (diagnóstico)."""
+    st.warning("Assine no quadro antes de registrar.")
+    with st.expander("Detalhes técnicos (se você já assinou e este aviso apareceu)"):
+        dados = getattr(resultado, "json_data", "sem json_data")
+        st.write("Tipo do json_data:", type(dados).__name__)
+        st.code(repr(dados)[:1500])
 
 
 def campo_assinatura(chave):
@@ -326,7 +382,7 @@ if menu == "Registrar Movimentação":
             else:
                 assinatura = assinatura_para_base64(canvas_saida)
                 if assinatura is None:
-                    st.warning("Assine no quadro antes de registrar.")
+                    aviso_sem_assinatura(canvas_saida)
                 else:
                     # Relê a planilha na hora de salvar (evita 2 pessoas pegarem o mesmo item)
                     atual = carregar_dados()
@@ -368,7 +424,7 @@ if menu == "Registrar Movimentação":
             if st.button("Registrar Entrada", type="primary"):
                 assinatura = assinatura_para_base64(canvas_entrada)
                 if assinatura is None:
-                    st.warning("Assine no quadro antes de registrar.")
+                    aviso_sem_assinatura(canvas_entrada)
                 else:
                     id_reg = opcoes[rotulo]
                     ws = aba_registros()
