@@ -42,7 +42,7 @@ LIMITE_CELULA = 45000
 # ---- Regras de autorização (duas senhas diferentes, ambas em Secrets) ----
 #   senha_responsavel = "..."   -> almoxarifado: libera a ASSINATURA de devolução
 #   senha_supervisor  = "..."   -> só o supervisor: libera NOVA RETIRADA de quem passou do prazo
-PRAZO_DEVOLUCAO_HORAS = 12      # passou disso sem devolver -> nova retirada precisa de autorização
+PRAZO_DEVOLUCAO_HORAS = 1/60      # passou disso sem devolver -> nova retirada precisa de autorização
 VALIDADE_LIBERACAO_MIN = 15     # quanto tempo a liberação da assinatura de devolução vale
 ABA_AUTORIZACOES = "Autorizacoes"
 COLUNAS_AUT = [
