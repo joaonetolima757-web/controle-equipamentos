@@ -34,14 +34,15 @@ COLUNAS = [
 ]
 
 # Cole o link da planilha aqui OU coloque em Secrets: planilha_url = "https://..."
-PLANILHA_URL = st.secrets.get("https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=483892025#gid=483892025")
+PLANILHA_URL = st.secrets.get("planilha_url", "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=483892025#gid=483892025")
 
 # Limite de uma célula do Google Sheets = 50.000 caracteres
 LIMITE_CELULA = 45000
 
-# ---- Regras de autorização (senha do responsável) ----
-# A senha fica em Secrets:  senha_responsavel = "sua-senha-aqui"
-PRAZO_DEVOLUCAO_HORAS = 1/60      # passou disso sem devolver -> nova retirada precisa de autorização
+# ---- Regras de autorização (duas senhas diferentes, ambas em Secrets) ----
+#   senha_responsavel = "..."   -> almoxarifado: libera a ASSINATURA de devolução
+#   senha_supervisor  = "..."   -> só o supervisor: libera NOVA RETIRADA de quem passou do prazo
+PRAZO_DEVOLUCAO_HORAS = 12      # passou disso sem devolver -> nova retirada precisa de autorização
 VALIDADE_LIBERACAO_MIN = 15     # quanto tempo a liberação da assinatura de devolução vale
 ABA_AUTORIZACOES = "Autorizacoes"
 COLUNAS_AUT = [
@@ -582,11 +583,11 @@ def horas_desde(texto):
 
 
 # ---------------------------------------------------------------- Autorizações (senha do responsável)
-def senha_correta(digitada):
-    """Confere a senha do responsável (Secrets: senha_responsavel). Mostra o erro na tela."""
-    correta = str(st.secrets.get("senha_responsavel", ""))
+def senha_correta(digitada, chave="senha_responsavel", quem="do responsável"):
+    """Confere uma senha guardada em Secrets (padrão: almoxarifado). Mostra o erro na tela."""
+    correta = str(st.secrets.get(chave, ""))
     if not correta:
-        st.error("Senha do responsável não configurada. Defina 'senha_responsavel' em Secrets.")
+        st.error(f"Senha {quem} não configurada. Defina '{chave}' em Secrets.")
         return False
     if not hmac.compare_digest(str(digitada).encode("utf-8"), correta.encode("utf-8")):
         st.error("Senha incorreta.")
@@ -742,12 +743,12 @@ def registrar_retirada(equip, lacre, colab, assinatura, atual=None):
 
 
 def bloco_autorizacao(p, pend):
-    """Aviso + senha do responsável + justificativa para liberar uma nova retirada."""
+    """Aviso + senha do SUPERVISOR + justificativa para liberar uma nova retirada."""
     ka = st.session_state.aut_key
     st.markdown(html_aviso_pendencia(pend["colab"], pend["atrasados"]), unsafe_allow_html=True)
-    st.caption("Nova retirada bloqueada. Para liberar, o responsável informa a senha "
+    st.caption("Nova retirada bloqueada. Para liberar, o supervisor informa a senha "
                "e o motivo de o equipamento não ter sido devolvido.")
-    senha = st.text_input("Senha do responsável *", type="password", key=f"{p}_senha_{ka}")
+    senha = st.text_input("Senha do supervisor *", type="password", key=f"{p}_senha_{ka}")
     justificativa = st.text_area("Motivo de não ter devolvido *", height=90, key=f"{p}_just_{ka}")
 
     col_ok, col_cancel = st.columns([1.3, 1])
@@ -762,7 +763,7 @@ def bloco_autorizacao(p, pend):
 
     if not liberar:
         return
-    if not senha_correta(senha):
+    if not senha_correta(senha, "senha_supervisor", "do supervisor"):
         return
     if not justificativa.strip():
         st.warning("Escreva o motivo de o equipamento não ter sido devolvido.")
@@ -777,7 +778,7 @@ def bloco_autorizacao(p, pend):
     st.session_state.pop(f"{p}_pend", None)
     st.session_state.saida_key += 1
     st.session_state.aut_key += 1
-    st.session_state.msg = f"Saída de '{pend['equip']}' registrada para {pend['colab']} com autorização do responsável!"
+    st.session_state.msg = f"Saída de '{pend['equip']}' registrada para {pend['colab']} com autorização do supervisor!"
     st.rerun()
 
 
@@ -848,7 +849,7 @@ def form_retirada(p, df, ferramentas, colaboradores, na_janela=False):
                 st.session_state.msg = f"Saída de '{equip}' registrada para {colab}!"
                 st.rerun()
             return
-        # Tem devolução vencida (mais de 12 horas): guarda o pedido e pede a senha do responsável
+        # Tem devolução vencida (mais de 12 horas): guarda o pedido e pede a senha do supervisor
         st.session_state[pend_key] = {
             "equip": equip, "lacre": lacre, "colab": colab,
             "assinatura": assinatura, "atrasados": atrasados,
