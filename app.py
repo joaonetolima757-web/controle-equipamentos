@@ -10,11 +10,11 @@ import uuid
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
-import gspread
+import msal
 import pandas as pd
+import requests
 import streamlit as st
 from fpdf import FPDF
-from google.oauth2.service_account import Credentials
 from PIL import Image, ImageDraw
 from streamlit_drawable_canvas import st_canvas
 
@@ -23,8 +23,15 @@ st.set_page_config(page_title="Controle de Equipamentos", layout="wide")
 FUSO = ZoneInfo("America/Sao_Paulo")
 FORMATO = "%Y-%m-%d %H:%M:%S"
 
-# Ordem EXATA das colunas da aba "Registros" (A até K)
-# A coluna K (Transferencias) é criada sozinha na primeira transferência.
+# Informe o domínio real do SharePoint, por exemplo: empresa.sharepoint.com
+# Também pode ser definido em .streamlit/secrets.toml como sharepoint_host.
+SHAREPOINT_HOST = st.secrets.get("sharepoint_host", "syngenta.sharepoint.com").strip().removeprefix("https://").removeprefix("http://").rstrip("/")
+SHAREPOINT_SITE_PATH = "/sites/Almoxarifado355"
+GRAPH_URL = "https://graph.microsoft.com/v1.0"
+CLIENT_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
+TENANT_ID = "organizations"
+SCOPES = ["Sites.ReadWrite.All"]
+
 COLUNAS = [
     "ID", "Equipamento", "Lacre", "Colaborador",
     "Data_Hora_Saida", "Assinatura_Saida",
@@ -33,18 +40,12 @@ COLUNAS = [
     "Transferencias",
 ]
 
-# Cole o link da planilha aqui OU coloque em Secrets: planilha_url = "https://..."
-PLANILHA_URL = st.secrets.get("planilha_url", "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=483892025#gid=483892025")
-
-# Limite de uma célula do Google Sheets = 50.000 caracteres
 LIMITE_CELULA = 45000
-
-# ---- Regras de autorização (duas senhas diferentes, ambas em Secrets) ----
-#   senha_responsavel = "..."   -> almoxarifado: libera a ASSINATURA de devolução
-#   senha_supervisor  = "..."   -> só o supervisor: libera NOVA RETIRADA de quem passou do prazo
-PRAZO_DEVOLUCAO_HORAS = 12      # passou disso sem devolver -> nova retirada precisa de autorização
-VALIDADE_LIBERACAO_MIN = 15     # quanto tempo a liberação da assinatura de devolução vale
+PRAZO_DEVOLUCAO_HORAS = 12
+VALIDADE_LIBERACAO_MIN = 15
 ABA_AUTORIZACOES = "Autorizacoes"
+# A lista aparece como Colaboradores, mas a URL SharePoint é /Lists/Nome/.
+LISTA_COLABORADORES = "Nome"
 COLUNAS_AUT = [
     "Data_Hora", "Tipo", "ID_Registro", "Colaborador",
     "Equipamento", "Lacre", "Justificativa", "Pendencias",
@@ -53,65 +54,227 @@ TIPO_RETIRADA = "Retirada com devolução atrasada"
 TIPO_LIB_DEVOLUCAO = "Liberação de assinatura (devolução)"
 TIPO_TRANSFERENCIA = "Transferência de equipamento"
 
-# Chaves para limpar o quadro de assinatura depois de salvar
 for chave in ("saida_key", "entrada_key", "aut_key", "lib_key", "transf_key"):
     if chave not in st.session_state:
         st.session_state[chave] = 0
 
 
-# ---------------------------------------------------------------- Google Sheets
-@st.cache_resource
-def conectar_planilha():
-    credenciais = dict(st.secrets["gcp_service_account"])
-    escopo = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(credenciais, scopes=escopo)
-    client = gspread.authorize(creds)
-    return client.open_by_url(PLANILHA_URL)
+def _obter_token():
+    """Obtém um token do Microsoft Graph uma vez por sessão."""
+    token_existente = st.session_state.get("graph_access_token")
+    if token_existente:
+        return token_existente
+
+    if "msal_cache" not in st.session_state:
+        st.session_state.msal_cache = msal.SerializableTokenCache()
+
+    app = msal.PublicClientApplication(
+        CLIENT_ID,
+        authority=f"https://login.microsoftonline.com/{TENANT_ID}",
+        token_cache=st.session_state.msal_cache,
+    )
+    accounts = app.get_accounts()
+    # get_accounts() devolve uma lista; o MSAL exige somente uma conta.
+    result = app.acquire_token_silent(SCOPES, account=accounts[0]) if accounts else None
+
+    if not result or "access_token" not in result:
+        st.info("Faça login com sua conta corporativa da Syngenta na janela que será aberta...")
+        result = app.acquire_token_interactive(scopes=SCOPES)
+
+    if "access_token" not in result:
+        st.error(f"Falha na autenticação Microsoft: {result.get('error_description', 'Erro desconhecido')}")
+        st.stop()
+
+    st.session_state.graph_access_token = result["access_token"]
+    return st.session_state.graph_access_token
+
+def _headers():
+    return {
+        "Authorization": f"Bearer {_obter_token()}",
+        "Content-Type": "application/json",
+    }
 
 
-def aba_registros():
-    return conectar_planilha().worksheet("Registros")
+def _obter_site_e_listas():
+    h = {"Authorization": f"Bearer {_obter_token()}"}
+    r_site = requests.get(
+        f"{GRAPH_URL}/sites/{SHAREPOINT_HOST}:{SHAREPOINT_SITE_PATH}",
+        headers=h,
+    )
+    r_site.raise_for_status()
+    site_id = r_site.json()["id"]
+    r_lists = requests.get(
+        f"{GRAPH_URL}/sites/{site_id}/lists",
+        headers=h,
+    )
+    r_lists.raise_for_status()
+    listas = {}
+    for lst in r_lists.json().get("value", []):
+        listas[lst["displayName"].strip().lower()] = lst["id"]
+    return site_id, listas
+
+
+def _chave_coluna(nome):
+    """Normaliza nomes visuais: aceita Tipo, Tipo. e Tipo: como a mesma coluna."""
+    return "".join(c for c in str(nome).strip().lower() if c.isalnum())
+
+
+def _mapa_colunas(list_id):
+    site_id, _ = _obter_site_e_listas()
+    h = {"Authorization": f"Bearer {_obter_token()}"}
+    r = requests.get(
+        f"{GRAPH_URL}/sites/{site_id}/lists/{list_id}/columns",
+        headers=h,
+    )
+    r.raise_for_status()
+    mapa = {}
+    for col in r.json().get("value", []):
+        disp = col.get("displayName", "").strip()
+        name = col.get("name", "").strip()
+        if not col.get("readOnly", False) or name == "Title":
+            mapa[disp.lower()] = name
+            mapa[name.lower()] = name
+            mapa[_chave_coluna(disp)] = name
+            mapa[_chave_coluna(name)] = name
+    return mapa
+
+
+def _ler_itens_lista(nome_lista):
+    site_id, listas = _obter_site_e_listas()
+    nome = nome_lista.strip().lower()
+    list_id = listas.get(nome)
+
+    # A URL fornecida confirma /Lists/Nome/. O Graph pode usar Nome como o
+    # identificador da lista mesmo quando o menu mostra “Colaboradores”.
+    if not list_id and nome in ("colaboradores", "nome"):
+        list_id = listas.get("nome") or listas.get("colaboradores")
+    if not list_id:
+        raise RuntimeError(
+            f"Lista '{nome_lista}' não encontrada. Listas disponíveis: {', '.join(sorted(listas))}"
+        )
+
+    mapa = _mapa_colunas(list_id)
+    campos = sorted(set(mapa.values()) | {"Title"})
+    url = (f"{GRAPH_URL}/sites/{site_id}/lists/{list_id}/items"
+           f"?$expand=fields($select={','.join(campos)})&$top=999")
+    itens = []
+    while url:
+        r = requests.get(url, headers={"Authorization": f"Bearer {_obter_token()}"})
+        r.raise_for_status()
+        dados = r.json()
+        for item in dados.get("value", []):
+            fields = item.get("fields") or {}
+            fields["_item_id"] = item["id"]
+            itens.append((fields, mapa))
+        url = dados.get("@odata.nextLink")
+    return itens
+
+def _valor_campo(fields, mapa, nome_coluna):
+    chave_interna = mapa.get(nome_coluna.lower()) or mapa.get(_chave_coluna(nome_coluna))
+    if chave_interna and chave_interna in fields:
+        val = fields[chave_interna]
+        return "" if val is None else str(val)
+    # Listas simples como Colaboradores podem ter a coluna padrão Title renomeada para Nome.
+    if nome_coluna.lower() in ("id", "equipamento", "nome", "data_hora", "data hora"):
+        val = fields.get("Title", "")
+        return "" if val is None else str(val)
+    return ""
+
+
+def _inserir_item_lista(nome_lista, dicionario_valores):
+    site_id, listas = _obter_site_e_listas()
+    list_id = listas.get(nome_lista.lower())
+    if not list_id:
+        st.error(f"Lista '{nome_lista}' não encontrada no SharePoint.")
+        return False
+    mapa = _mapa_colunas(list_id)
+    payload_fields = {}
+    for col_visual, valor in dicionario_valores.items():
+        chave_interna = mapa.get(col_visual.lower()) or mapa.get(_chave_coluna(col_visual))
+        if not chave_interna and col_visual.lower() in ("id", "data_hora", "data hora"):
+            chave_interna = "Title"
+        # No momento da retirada, campos de devolução e transferência ainda não
+        # existem. Não os envie vazios: algumas configurações de Microsoft Lists
+        # rejeitam esses valores no POST inicial.
+        if chave_interna and valor not in (None, ""):
+            payload_fields[chave_interna] = str(valor)
+
+    # Toda lista SharePoint possui a coluna interna obrigatória Title. Mesmo quando
+    # ela aparece na tela como “ID”, o Graph exige que esse campo seja preenchido.
+    if "Title" not in payload_fields:
+        titulo = dicionario_valores.get("ID") or dicionario_valores.get("Data_Hora") or nome_lista
+        payload_fields["Title"] = str(titulo)
+
+    r = requests.post(
+        f"{GRAPH_URL}/sites/{site_id}/lists/{list_id}/items",
+        headers=_headers(),
+        json={"fields": payload_fields},
+    )
+    if not r.ok:
+        # A assinatura é propositalmente omitida da tela de diagnóstico.
+        campos_enviados = ", ".join(sorted(payload_fields.keys()))
+        try:
+            detalhe = r.json().get("error", {}).get("message", r.text)
+        except ValueError:
+            detalhe = r.text
+        st.error(
+            f"Não foi possível salvar em '{nome_lista}' (HTTP {r.status_code}): {detalhe}. "
+            f"Campos enviados: {campos_enviados}."
+        )
+        return False
+    return True
+
+
+def _atualizar_item_lista(nome_lista, item_id, dicionario_valores):
+    site_id, listas = _obter_site_e_listas()
+    list_id = listas.get(nome_lista.lower())
+    mapa = _mapa_colunas(list_id)
+    payload_fields = {}
+    for col_visual, valor in dicionario_valores.items():
+        chave_interna = mapa.get(col_visual.lower()) or mapa.get(_chave_coluna(col_visual))
+        if chave_interna:
+            payload_fields[chave_interna] = str(valor) if valor is not None else ""
+    r = requests.patch(
+        f"{GRAPH_URL}/sites/{site_id}/lists/{list_id}/items/{item_id}/fields",
+        headers=_headers(),
+        json=payload_fields,
+    )
+    if not r.ok:
+        st.error(f"Erro ao atualizar no Microsoft Lists: {r.text}")
+        return False
+    return True
 
 
 def carregar_dados():
-    """Lê tudo como TEXTO (evita o Sheets converter número/data/vírgula)."""
-    valores = aba_registros().get_all_values()
-    if len(valores) <= 1:
-        return pd.DataFrame(columns=COLUNAS)
+    itens = _ler_itens_lista("Registros")
+    if not itens:
+        return pd.DataFrame(columns=COLUNAS + ["_item_id"])
     linhas = []
-    for r in valores[1:]:
-        r = (r + [""] * len(COLUNAS))[: len(COLUNAS)]
-        if any(c.strip() for c in r):
-            linhas.append(r)
-    return pd.DataFrame(linhas, columns=COLUNAS)
+    for fields, mapa in itens:
+        linha = [_valor_campo(fields, mapa, col) for col in COLUNAS]
+        if any(c.strip() for c in linha):
+            linhas.append(linha + [fields["_item_id"]])
+    return pd.DataFrame(linhas, columns=COLUNAS + ["_item_id"])
 
 
-@st.cache_data(ttl=120, show_spinner=False)
 def ler_lista(nome_aba, colunas_preferidas, qtd_colunas):
-    """Lê as abas Ferramentas / Colaboradores. Se não achar, devolve lista vazia."""
     try:
-        valores = conectar_planilha().worksheet(nome_aba).get_all_values()
-    except Exception:
+        itens = _ler_itens_lista(nome_aba)
+    except Exception as exc:
+        st.error(f"Não foi possível ler a lista '{nome_aba}': {exc}")
         return []
-    if len(valores) <= 1:
-        return []
-    cab = [c.strip().lower() for c in valores[0]]
-    idx = []
-    for nome in colunas_preferidas:
-        idx.append(cab.index(nome.lower()) if nome.lower() in cab else None)
-    if any(i is None for i in idx):
-        idx = list(range(qtd_colunas))
-    saida = []
-    for r in valores[1:]:
-        r = r + [""] * (max(idx) + 1 - len(r)) if len(r) <= max(idx) else r
-        item = tuple(r[i].strip() for i in idx)
-        if item[0]:
-            saida.append(item)
-    return saida
 
+    saida = []
+    for fields, mapa in itens:
+        if nome_aba.strip().lower() in ("colaboradores", "nome"):
+            nome = str(fields.get("Title") or "").strip()
+            if nome:
+                saida.append(nome)
+            continue
+        item = tuple(_valor_campo(fields, mapa, col).strip() for col in colunas_preferidas)
+        if item and item[0]:
+            saida.append(item[0] if qtd_colunas == 1 else item)
+    return list(dict.fromkeys(saida)) if qtd_colunas == 1 else saida
 
 # ---------------------------------------------------------------- Assinatura
 LARGURA_ASS, ALTURA_ASS = 300, 120
@@ -595,37 +758,35 @@ def senha_correta(digitada, chave="senha_responsavel", quem="do responsável"):
     return True
 
 
-def aba_autorizacoes():
-    """Aba de auditoria. Se ainda não existir, é criada sozinha com o cabeçalho."""
-    planilha = conectar_planilha()
-    try:
-        return planilha.worksheet(ABA_AUTORIZACOES)
-    except gspread.WorksheetNotFound:
-        ws = planilha.add_worksheet(title=ABA_AUTORIZACOES, rows=1000, cols=len(COLUNAS_AUT))
-        ws.append_row(COLUNAS_AUT, value_input_option="RAW")
-        return ws
-
-
 def registrar_autorizacao(tipo, id_reg, colab, equip, lacre, justificativa="", pendencias=""):
-    aba_autorizacoes().append_row(
-        [agora().strftime(FORMATO), tipo, id_reg, colab, equip, str(lacre), justificativa, pendencias],
-        value_input_option="RAW",
+    """Registra a autorização e devolve True apenas quando ela foi salva."""
+    return _inserir_item_lista(
+        ABA_AUTORIZACOES,
+        {
+            "Data_Hora": agora().strftime(FORMATO),
+            "Tipo": tipo,
+            "ID_Registro": id_reg,
+            "Colaborador": colab,
+            "Equipamento": equip,
+            "Lacre": str(lacre),
+            "Justificativa": justificativa,
+            "Pendencias": pendencias,
+        },
     )
 
 
 def carregar_motivos():
-    """Lê a aba Autorizacoes e devolve os motivos por registro, para o relatório:
-    {"transf": {id: [motivo da 1ª transferência, 2ª, ...]},
-     "retirada": {id: (motivo, pendências)}}  (retirada liberada com devolução atrasada)"""
     saida = {"transf": {}, "retirada": {}}
     try:
-        valores = aba_autorizacoes().get_all_values()
+        itens = _ler_itens_lista(ABA_AUTORIZACOES)
     except Exception:
         traceback.print_exc()
         return saida
-    for r in valores[1:]:
-        r = (r + [""] * len(COLUNAS_AUT))[: len(COLUNAS_AUT)]
-        tipo, id_reg, just, pend = r[1], r[2], r[6].strip(), r[7].strip()
+    for fields, mapa in itens:
+        tipo = _valor_campo(fields, mapa, "Tipo")
+        id_reg = _valor_campo(fields, mapa, "ID_Registro") or _valor_campo(fields, mapa, "ID Registro")
+        just = _valor_campo(fields, mapa, "Justificativa").strip()
+        pend = _valor_campo(fields, mapa, "Pendencias").strip()
         if tipo == TIPO_TRANSFERENCIA:
             saida["transf"].setdefault(id_reg, []).append(just)
         elif tipo == TIPO_RETIRADA:
@@ -634,18 +795,18 @@ def carregar_motivos():
 
 
 def liberacao_valida(id_reg):
-    """True se o almoxarifado liberou a assinatura deste registro há menos de VALIDADE_LIBERACAO_MIN."""
-    valores = aba_autorizacoes().get_all_values()
-    for r in reversed(valores[1:]):
-        r = (r + [""] * len(COLUNAS_AUT))[: len(COLUNAS_AUT)]
-        if r[1] == TIPO_LIB_DEVOLUCAO and r[2] == id_reg:
+    itens = _ler_itens_lista(ABA_AUTORIZACOES)
+    for fields, mapa in reversed(itens):
+        tipo = _valor_campo(fields, mapa, "Tipo")
+        id_item = _valor_campo(fields, mapa, "ID_Registro") or _valor_campo(fields, mapa, "ID Registro")
+        if tipo == TIPO_LIB_DEVOLUCAO and id_item == id_reg:
+            dt_txt = _valor_campo(fields, mapa, "Data_Hora") or _valor_campo(fields, mapa, "Data Hora")
             try:
-                quando = datetime.strptime(r[0], FORMATO)
+                quando = datetime.strptime(dt_txt, FORMATO)
             except ValueError:
                 continue
             return agora() - quando <= timedelta(minutes=VALIDADE_LIBERACAO_MIN)
     return False
-
 
 def prazo_devolucao(inicio_dt):
     return inicio_dt + timedelta(hours=PRAZO_DEVOLUCAO_HORAS)
@@ -722,8 +883,6 @@ def html_aviso_pendencia(colab, atrasados):
 
 
 def registrar_retirada(equip, lacre, colab, assinatura, atual=None):
-    """Grava a saída. Devolve o ID novo, ou None se o item já estiver em uso."""
-    # Relê a planilha na hora de salvar (evita 2 pessoas pegarem o mesmo item)
     if atual is None:
         atual = carregar_dados()
     ocupado = atual[
@@ -734,12 +893,23 @@ def registrar_retirada(equip, lacre, colab, assinatura, atual=None):
         st.error(f"'{equip}' (lacre {lacre}) já está em uso por {ocupado.iloc[-1]['Colaborador']}.")
         return None
     id_novo = uuid.uuid4().hex[:8]
-    aba_registros().append_row(
-        [id_novo, equip, str(lacre), colab,
-         agora().strftime(FORMATO), assinatura, "", "", "Em uso", 0.0],
-        value_input_option="RAW",
+    ok = _inserir_item_lista(
+        "Registros",
+        {
+            "ID": id_novo,
+            "Equipamento": equip,
+            "Lacre": str(lacre),
+            "Colaborador": colab,
+            "Data_Hora_Saida": agora().strftime(FORMATO),
+            "Assinatura_Saida": assinatura,
+            "Data_Hora_Entrada": "",
+            "Assinatura_Entrada": "",
+            "Status": "Em uso",
+            "Tempo_Uso_Horas": "0.0",
+            "Transferencias": "",
+        },
     )
-    return id_novo
+    return id_novo if ok else None
 
 
 def bloco_autorizacao(p, pend):
@@ -932,33 +1102,29 @@ def form_devolucao(p, df, id_fixo=None, na_janela=False):
         if not liberacao_valida(id_reg):
             st.error("A liberação expirou. Peça ao almoxarifado para liberar novamente.")
             return
-        ws = aba_registros()
         atual = carregar_dados()
         linha_df = atual[(atual["ID"] == id_reg) & (atual["Status"] == "Em uso")]
         if linha_df.empty:
             st.error("Este equipamento já foi devolvido.")
             return
-        saida = datetime.strptime(linha_df.iloc[0]["Data_Hora_Saida"], FORMATO)
+        reg = linha_df.iloc[0]
+        saida = datetime.strptime(reg["Data_Hora_Saida"], FORMATO)
         entrada = agora()
         horas = round((entrada - saida).total_seconds() / 3600, 2)
-        numero_linha = ws.col_values(1).index(id_reg) + 1
-        ws.batch_update(
-            [{"range": f"G{numero_linha}:J{numero_linha}",
-              "values": [[entrada.strftime(FORMATO), assinatura, "Devolvido", horas]]}],
-            value_input_option="RAW",
+        ok = _atualizar_item_lista(
+            "Registros",
+            reg["_item_id"],
+            {
+                "Data_Hora_Entrada": entrada.strftime(FORMATO),
+                "Assinatura_Entrada": assinatura,
+                "Status": "Devolvido",
+                "Tempo_Uso_Horas": str(horas),
+            },
         )
-        st.session_state.entrada_key += 1
-        st.session_state.msg = f"Entrada registrada! Tempo de uso: {formata_tempo(horas)}."
-        st.rerun()
-
-
-def garantir_coluna_transferencias(ws):
-    """Cria o cabeçalho da coluna K (Transferencias) na aba Registros, se faltar."""
-    if ws.col_count < len(COLUNAS):
-        ws.add_cols(len(COLUNAS) - ws.col_count)
-    cab = ws.row_values(1)
-    if len(cab) < len(COLUNAS) or cab[len(COLUNAS) - 1].strip() != COLUNAS[-1]:
-        ws.update_cell(1, len(COLUNAS), COLUNAS[-1])
+        if ok:
+            st.session_state.entrada_key += 1
+            st.session_state.msg = f"Entrada registrada! Tempo de uso: {formata_tempo(horas)}."
+            st.rerun()
 
 
 def form_transferencia(p, df, colaboradores, id_fixo=None, na_janela=False):
@@ -1026,7 +1192,6 @@ def form_transferencia(p, df, colaboradores, id_fixo=None, na_janela=False):
         st.warning("O equipamento já está com este colaborador.")
         return
 
-    ws = aba_registros()
     atual = carregar_dados()  # relê na hora de salvar
     linha_df = atual[(atual["ID"] == id_reg) & (atual["Status"] == "Em uso")]
     if linha_df.empty:
@@ -1038,21 +1203,21 @@ def form_transferencia(p, df, colaboradores, id_fixo=None, na_janela=False):
     historico = reg["Transferencias"].strip()
     historico = (historico + SEP_TRANSF if historico else "") + f"{de} > {novo} @ {agora_txt}"
 
-    garantir_coluna_transferencias(ws)
-    numero_linha = ws.col_values(1).index(id_reg) + 1
-    ws.batch_update(
-        [
-            {"range": f"D{numero_linha}", "values": [[novo]]},
-            {"range": f"K{numero_linha}", "values": [[historico]]},
-        ],
-        value_input_option="RAW",
+    ok = _atualizar_item_lista(
+        "Registros",
+        reg["_item_id"],
+        {
+            "Colaborador": novo,
+            "Transferencias": historico,
+        },
     )
-    registrar_autorizacao(TIPO_TRANSFERENCIA, id_reg, novo, reg["Equipamento"], reg["Lacre"],
-                          motivo.strip(), f"De {de} para {novo}")
-    st.session_state.transf_key += 1
-    st.session_state.msg = (f"'{reg['Equipamento']}' transferido de {de} para {novo}. "
-                            f"{novo} assina na devolução.")
-    st.rerun()
+    if ok:
+        registrar_autorizacao(TIPO_TRANSFERENCIA, id_reg, novo, reg["Equipamento"], reg["Lacre"],
+                              motivo.strip(), f"De {de} para {novo}")
+        st.session_state.transf_key += 1
+        st.session_state.msg = (f"'{reg['Equipamento']}' transferido de {de} para {novo}. "
+                                f"{novo} assina na devolução.")
+        st.rerun()
 
 
 @st.dialog("Registrar movimentação")
@@ -1086,7 +1251,7 @@ if "msg" in st.session_state:
 if menu == "Painel":
     df = carregar_dados()
     ferramentas = ler_lista("Ferramentas", ["Equipamento", "Lacre"], 2)
-    colaboradores = [c[0] for c in ler_lista("Colaboradores", ["Colaborador"], 1)]
+    colaboradores = ler_lista(LISTA_COLABORADORES, ["Title"], 1)
     em_uso = df[df["Status"] == "Em uso"]
     bloqueados = {chave_equip(r.Equipamento, r.Lacre) for r in em_uso.itertuples()}
 
@@ -1193,11 +1358,16 @@ elif menu == "Almoxarifado":
                     st.warning("Selecione o equipamento.")
                 elif senha_correta(senha):
                     r = opcoes[rotulo]
-                    registrar_autorizacao(TIPO_LIB_DEVOLUCAO, r.ID, r.Colaborador, r.Equipamento, r.Lacre)
-                    st.session_state.lib_key += 1
-                    st.session_state.msg = (f"Assinatura liberada para {r.Colaborador} "
-                                            f"({r.Equipamento}, lacre {r.Lacre}).")
-                    st.rerun()
+                    ok = registrar_autorizacao(
+                        TIPO_LIB_DEVOLUCAO, r.ID, r.Colaborador, r.Equipamento, r.Lacre
+                    )
+                    if ok:
+                        st.session_state.lib_key += 1
+                        st.session_state.msg = (f"Assinatura liberada para {r.Colaborador} "
+                                                f"({r.Equipamento}, lacre {r.Lacre}).")
+                        st.rerun()
+                    else:
+                        st.error("A liberação não foi salva em 'Autorizacoes'. Corrija o erro exibido antes de tentar assinar.")
 
 else:
     st.markdown('<p class="tit">Relatórios</p>'
