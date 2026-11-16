@@ -34,7 +34,7 @@ COLUNAS = [
 ]
 
 # Cole o link da planilha aqui OU coloque em Secrets: planilha_url = "https://..."
-PLANILHA_URL = st.secrets.get("planilha_url", "https://docs.google.com/spreadsheets/d/1i5uOxp-hNCAvvbBX1580AKGpp9zWYu2DHBcK43272Sw/edit?gid=0#gid=0")
+PLANILHA_URL = st.secrets.get("planilha_url", "")
 
 # Limite de uma célula do Google Sheets = 50.000 caracteres
 LIMITE_CELULA = 45000
